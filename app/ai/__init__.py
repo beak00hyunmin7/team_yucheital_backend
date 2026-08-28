@@ -1,0 +1,1 @@
+"""Replaceable analysis-model adapters."""

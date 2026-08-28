@@ -4,7 +4,45 @@ services:
     ports:
       - "8000:8000"
     environment:
+      DATABASE_URL: "mysql+pymysql://terrain:${MYSQL_PASSWORD:-terrain}@mysql:3306/terrain_drainage?charset=utf8mb4"
+      STORAGE_ROOT: "/app/data/storage"
       MAX_UPLOAD_BYTES: "10485760"
       MAX_IMAGE_PIXELS: "16000000"
       ANALYSIS_MAX_DIMENSION: "512"
+      MAX_ANALYSIS_ATTEMPTS: "3"
+      MIN_MEAN_SUITABILITY: "0.40"
+      MIN_CAPTURE_RATIO: "0.005"
+      MIN_STABILITY_SCORE: "0.25"
+      MIN_AUTO_VERIFICATION_CONFIDENCE: "0.45"
+      # 컨테이너 안에는 deploy_package(호스트의 형제 폴더)가 없으므로, 아래
+      # bind mount로 들어오는 경로를 명시적으로 가리켜야 U-Net 체크포인트를 찾는다.
+      AI_MODEL_CHECKPOINT: "/app/checkpoints/best.pt"
+    volumes:
+      - analysis_data:/app/data
+      # 호스트의 Desktop/deploy_package/checkpoints (compose.yaml 기준 ../deploy_package/checkpoints)를
+      # 읽기 전용으로 연결. 이 폴더가 없으면 여기서 바로 에러가 나므로 위치를 먼저 확인할 것.
+      - ../deploy_package/checkpoints:/app/checkpoints:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
 
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: "terrain_drainage"
+      MYSQL_USER: "terrain"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-terrain}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-terrain-root-local}"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uterrain -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  analysis_data:
+  mysql_data:

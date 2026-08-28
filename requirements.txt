@@ -2,4 +2,11 @@ fastapi[standard]>=0.116,<1.0
 numpy>=2.0,<3.0
 pillow>=11.0,<13.0
 python-multipart>=0.0.20,<1.0
+sqlalchemy>=2.0,<3.0
+pymysql>=1.1,<2.0
 
+# app/ai/unet_infer (AI 모델링 팀 deploy_package를 vendoring한 실제 추론 모델)용.
+# AI_BACKEND=d8로만 쓸 거면 없어도 되지만, 기본값이 unet이라 설치를 권장합니다.
+torch>=2.1.0
+torchvision>=0.16.0
+matplotlib>=3.7

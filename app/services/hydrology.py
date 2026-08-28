@@ -21,6 +21,13 @@ class HydrologyResult:
     accumulation: np.ndarray
     flow_slope: np.ndarray
     score: np.ndarray
+    downstream: np.ndarray
+    # (H, W, 3) uint8 RGB image straight from a trained model's prediction
+    # (e.g. the U-Net's watermap output), if one produced this result. When
+    # set, visualization should render this image instead of re-deriving a
+    # heatmap from D8 accumulation, so the frontend shows what the model
+    # actually predicted. None for the D8 surrogate model.
+    visualization_image: np.ndarray | None = None
 
 
 def recommend_drains(
@@ -29,6 +36,7 @@ def recommend_drains(
     drain_count: int,
     minimum_spacing_ratio: float,
     edge_margin_ratio: float = 0.025,
+    score_weights: tuple[float, float, float] = (0.65, 0.25, 0.10),
 ) -> HydrologyResult:
     """Recommend drain cells using D8 flow routing and terrain-based scoring.
 
@@ -36,12 +44,7 @@ def recommend_drains(
     Strictly descending routing makes the graph acyclic, allowing upstream
     contributing-cell counts to be accumulated in descending elevation order.
     """
-    if elevation.ndim != 2:
-        raise ValueError("elevation must be a two-dimensional array")
-    if min(elevation.shape) < 8:
-        raise ValueError("elevation grid is too small")
-    if not 1 <= drain_count <= 10:
-        raise ValueError("drain_count must be between 1 and 10")
+    _validate_inputs(elevation, drain_count)
 
     downstream, flow_slope = _d8_downstream(elevation)
     accumulation = _flow_accumulation(elevation, downstream)
@@ -54,9 +57,97 @@ def recommend_drains(
 
     # Accumulation dominates; low terrain and local depressions break ties and
     # favor sites that naturally retain runoff.
-    score = 0.65 * acc_score + 0.25 * low_score + 0.10 * depression_score
+    if any(weight < 0 for weight in score_weights) or not np.isclose(
+        sum(score_weights), 1.0
+    ):
+        raise ValueError("score_weights must be non-negative and sum to 1")
+    flow_weight, low_weight, depression_weight = score_weights
+    score = (
+        flow_weight * acc_score
+        + low_weight * low_score
+        + depression_weight * depression_score
+    )
     score = np.clip(score, 0.0, 1.0)
 
+    return _finalize_result(
+        elevation=elevation,
+        downstream=downstream,
+        flow_slope=flow_slope,
+        accumulation=accumulation,
+        local_depression=local_depression,
+        score=score,
+        drain_count=drain_count,
+        minimum_spacing_ratio=minimum_spacing_ratio,
+        edge_margin_ratio=edge_margin_ratio,
+    )
+
+
+def recommend_drains_from_score(
+    elevation: np.ndarray,
+    predicted_suitability: np.ndarray,
+    *,
+    drain_count: int,
+    minimum_spacing_ratio: float,
+    edge_margin_ratio: float = 0.025,
+    visualization_image: np.ndarray | None = None,
+) -> HydrologyResult:
+    """Recommend drain cells from an externally predicted suitability map.
+
+    Used to plug in a trained model (e.g. the contour2flow U-Net) that
+    predicts *where* water pools/flows as an image, instead of the built-in
+    D8 heuristic score. D8 routing/accumulation is still computed from the
+    real elevation grid because validation (capture-ratio, stability) and
+    the water-map visualization both depend on it; only the ranking used to
+    pick drain sites is replaced with the model's prediction.
+    """
+    _validate_inputs(elevation, drain_count)
+    if predicted_suitability.shape != elevation.shape:
+        raise ValueError(
+            "predicted_suitability must have the same shape as elevation"
+        )
+
+    downstream, flow_slope = _d8_downstream(elevation)
+    accumulation = _flow_accumulation(elevation, downstream)
+    local_depression = _local_depression(elevation)
+
+    score = _normalize(np.clip(predicted_suitability.astype(np.float64), 0.0, None))
+
+    return _finalize_result(
+        elevation=elevation,
+        downstream=downstream,
+        flow_slope=flow_slope,
+        accumulation=accumulation,
+        local_depression=local_depression,
+        score=score,
+        drain_count=drain_count,
+        minimum_spacing_ratio=minimum_spacing_ratio,
+        edge_margin_ratio=edge_margin_ratio,
+        visualization_image=visualization_image,
+    )
+
+
+def _validate_inputs(elevation: np.ndarray, drain_count: int) -> None:
+    if elevation.ndim != 2:
+        raise ValueError("elevation must be a two-dimensional array")
+    if min(elevation.shape) < 8:
+        raise ValueError("elevation grid is too small")
+    if not 1 <= drain_count <= 10:
+        raise ValueError("drain_count must be between 1 and 10")
+
+
+def _finalize_result(
+    *,
+    elevation: np.ndarray,
+    downstream: np.ndarray,
+    flow_slope: np.ndarray,
+    accumulation: np.ndarray,
+    local_depression: np.ndarray,
+    score: np.ndarray,
+    drain_count: int,
+    minimum_spacing_ratio: float,
+    edge_margin_ratio: float,
+    visualization_image: np.ndarray | None = None,
+) -> HydrologyResult:
     valid = np.ones(elevation.shape, dtype=bool)
     margin = max(1, round(min(elevation.shape) * edge_margin_ratio))
     valid[:margin, :] = False
@@ -78,6 +169,8 @@ def recommend_drains(
         accumulation=accumulation,
         flow_slope=flow_slope,
         score=score,
+        downstream=downstream,
+        visualization_image=visualization_image,
     )
 
 
@@ -195,4 +288,3 @@ def _select_spaced_candidates(
     if len(selected) < count:
         raise ValueError("요청한 개수만큼 간격을 둔 배수구 후보를 찾을 수 없습니다.")
     return selected
-

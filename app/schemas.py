@@ -46,10 +46,24 @@ class AnalysisParameters(BaseModel):
 
 class AnalysisResponse(BaseModel):
     request_id: str
+    analysis_case_id: str
+    status: str
+    verification_status: str
+    validation_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    retry_count: int = Field(default=0, ge=0)
+    selected_attempt_number: int | None = Field(default=None, ge=1)
+    training_status: str
+    automatic_validation: "AutoValidationResponse"
+    model_version: str
+    cache_hit: bool = False
     algorithm: str
     image: ImageMetadata
     parameters: AnalysisParameters
     drains: list[DrainRecommendation]
+    input_image_url: str
+    water_map_url: str
+    overlay_image_url: str
+    processing_time_ms: int
     assumptions: list[str]
     warnings: list[str]
     overlay_png_base64: str | None = Field(
@@ -63,3 +77,42 @@ class HealthResponse(BaseModel):
     service: str
     version: str
 
+
+class TrainingDrainPosition(BaseModel):
+    order: int = Field(ge=1, le=10)
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class AutoValidationResponse(BaseModel):
+    attempt_number: int
+    status: str
+    passed: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    count_ok: bool
+    spacing_ok: bool
+    boundary_ok: bool
+    minimum_spacing_ratio_actual: float = Field(ge=0.0)
+    mean_suitability: float = Field(ge=0.0, le=1.0)
+    estimated_capture_ratio: float = Field(ge=0.0, le=1.0)
+    residual_water_ratio: float = Field(ge=0.0, le=1.0)
+    stability_score: float = Field(ge=0.0, le=1.0)
+    failure_reasons: list[str]
+    validator_version: str
+
+
+class TrainingDatasetItemResponse(BaseModel):
+    item_id: int
+    analysis_case_id: str
+    status: str
+    input_image_url: str
+    target_watermap_url: str
+    target_positions: list[TrainingDrainPosition]
+    source_model_version: str
+    validator_version: str
+    quality_score: float
+    verified_at: str
+
+
+AnalysisResponse.model_rebuild()

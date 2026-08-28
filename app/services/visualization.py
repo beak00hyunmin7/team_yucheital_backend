@@ -8,16 +8,26 @@ from PIL import Image, ImageDraw
 from app.services.hydrology import HydrologyResult
 
 
-def render_overlay(
-    original_rgb: Image.Image,
+def render_watermap(
     result: HydrologyResult,
     *,
+    output_size: tuple[int, int],
+) -> bytes:
+    output = BytesIO()
+    _base_canvas(result, output_size).save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def render_overlay(
+    result: HydrologyResult,
+    *,
+    output_size: tuple[int, int],
     scale_x: float,
     scale_y: float,
 ) -> bytes:
-    base = original_rgb.convert("RGB")
-    heatmap = _flow_heatmap(result.accumulation, base.size)
-    canvas = Image.blend(base, heatmap, alpha=0.33)
+    # The result view is intentionally based on the water map, not the input
+    # contour/DEM image. The original remains available as a separate asset.
+    canvas = _base_canvas(result, output_size)
     draw = ImageDraw.Draw(canvas)
 
     radius = max(8, round(min(canvas.size) * 0.018))
@@ -46,6 +56,16 @@ def render_overlay(
     return output.getvalue()
 
 
+def _base_canvas(result: HydrologyResult, output_size: tuple[int, int]) -> Image.Image:
+    if result.visualization_image is not None:
+        # A trained model (e.g. the U-Net) produced this result: show its
+        # actual predicted image instead of a D8-derived heatmap.
+        return Image.fromarray(result.visualization_image, mode="RGB").resize(
+            output_size, Image.Resampling.BILINEAR
+        )
+    return _flow_heatmap(result.accumulation, output_size)
+
+
 def _flow_heatmap(accumulation: np.ndarray, output_size: tuple[int, int]) -> Image.Image:
     normalized = np.log1p(accumulation)
     normalized /= max(float(normalized.max()), 1e-12)
@@ -54,4 +74,3 @@ def _flow_heatmap(accumulation: np.ndarray, output_size: tuple[int, int]) -> Ima
     blue = np.clip(1.2 - 2.0 * normalized, 0.0, 1.0)
     rgb = (np.stack([red, green, blue], axis=-1) * 255).astype(np.uint8)
     return Image.fromarray(rgb, mode="RGB").resize(output_size, Image.Resampling.BILINEAR)
-
