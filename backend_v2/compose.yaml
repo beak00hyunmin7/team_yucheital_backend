@@ -1,0 +1,56 @@
+services:
+  api-v2:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      V2_DATABASE_URL: "mysql+pymysql://terrain:${MYSQL_PASSWORD:?set MYSQL_PASSWORD}@mysql-v2:3306/terrain_drainage_v2?charset=utf8mb4"
+      V2_STORAGE_ROOT: "/app/data/storage"
+      V2_AUTO_CREATE_TABLES: "false"
+      AI_MODEL_CHECKPOINT: "/app/checkpoints/best.pt"
+      AI_MODEL_VERSION: "${AI_MODEL_VERSION:-drainage-film-v5}"
+      AI_MODEL_IMAGE_SIZE: "256"
+      AI_INFERENCE_CONCURRENCY: "${AI_INFERENCE_CONCURRENCY:-1}"
+      AI_INFERENCE_WAIT_TIMEOUT_S: "${AI_INFERENCE_WAIT_TIMEOUT_S:-30}"
+      AI_USE_FP16: "${AI_USE_FP16:-false}"
+      AI_WARMUP_MODEL: "true"
+      SCENARIO_EVALUATOR: "${SCENARIO_EVALUATOR:-capacity_approx}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}"
+    volumes:
+      - v2_analysis_data:/app/data
+      - ${AI_CHECKPOINT_HOST_DIR:?set AI_CHECKPOINT_HOST_DIR}:/app/checkpoints:ro
+    depends_on:
+      mysql-v2:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v2/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  mysql-v2:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: "terrain_drainage_v2"
+      MYSQL_USER: "terrain"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?set MYSQL_PASSWORD}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - v2_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uterrain -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  v2_analysis_data:
+  v2_mysql_data:
