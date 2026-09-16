@@ -10,8 +10,20 @@ from app.services.hydrology import HydrologyResult, recommend_drains_from_score
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = os.environ.get("UNET_MODEL_VERSION", "contour2flow-unet-v1")
+MODEL_VERSION = os.environ.get("UNET_MODEL_VERSION", "contour2flow-unet-v5-wet8")
 MODEL_NAME = "contour2flow U-Net (AI 모델링 팀 제공)"
+
+# 조건부 체크포인트(cond_dim>=1)에 넘길 기본 조건.
+#
+# 이 백엔드는 "이 지형에 배수구를 어디 둘까"를 묻는 용도라 사용자가 강우/시점을 고르지
+# 않는다. 그래서 대표값을 서버가 정한다.
+#
+# 경과 시간 주의: 학습 데이터(OpenFOAM)는 비가 초반에 내리고 이후 빠지는 시뮬레이션이라
+# 수심이 시간에 따라 **줄어든다** (정답 평균 수심 t=18s 0.039m -> t=120s 0.019m).
+# 즉 120초는 가장 덜 잠긴 상태다. 배수구 위치는 가장 심한 상태에서 판단해야 하므로
+# 기본값을 18초로 둔다.
+DEFAULT_RAIN_MM = float(os.environ.get("UNET_RAIN_MM", "60"))    # 학습 범위 20~80mm
+DEFAULT_TIME_S = float(os.environ.get("UNET_TIME_S", "18"))      # 학습 범위 0~120s
 
 
 class UnetDrainageModel:
@@ -53,7 +65,7 @@ class UnetDrainageModel:
     ) -> tuple[np.ndarray, np.ndarray]:
         # 지연 import: torch/torchvision이 없거나 체크포인트가 없어도
         # (AI_BACKEND=d8인) 다른 경로는 이 모듈을 아예 건드리지 않도록.
-        from app.ai.unet_infer.inference_api import predict_from_image
+        from app.ai.unet_infer.inference_api import current_cond_dim, predict_from_image
         from app.ai.unet_infer.utils.render_fields import render_contour_rgb
 
         height, width = elevation.shape
@@ -67,7 +79,17 @@ class UnetDrainageModel:
         # 만들어낸 0~1 고도 격자를 기준으로 매번 같은 형식의 입력을 재구성하므로
         # 업로드 형식에 관계없이 U-Net이 학습 때 본 것과 같은 스타일의 입력을 받는다.
         contour_rgb = render_contour_rgb(grid_x, grid_y, elevation)
-        predicted = predict_from_image(Image.fromarray(contour_rgb))
+
+        # 체크포인트가 요구하는 조건만 넘긴다. v1 계열(cond_dim=0)은 조건을 받지 않고,
+        # v2~v4 는 강우량만(cond_dim=1), v5 이후는 강우량+경과시간(cond_dim=2)이 필수다.
+        # 조건을 빼먹으면 inference_api 가 한국어 메시지로 바로 알려준다.
+        cond: dict[str, float] = {}
+        cond_dim = current_cond_dim()
+        if cond_dim >= 1:
+            cond["rain_mm"] = DEFAULT_RAIN_MM
+        if cond_dim == 2:
+            cond["time_s"] = DEFAULT_TIME_S
+        predicted = predict_from_image(Image.fromarray(contour_rgb), **cond)
 
         # 학습 타깃(data/flow/*.png)은 matplotlib "Blues" 컬러맵으로 그린 수심맵이라
         # 값이 클수록(수심이 깊을수록) 더 진한 파란색 = 밝기(luminance)가 낮다.
