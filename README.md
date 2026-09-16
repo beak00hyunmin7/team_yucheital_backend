@@ -12,8 +12,47 @@
 
 별도의 사용자·전문가 승인 단계는 없습니다.
 
-> 현재 포함된 분석기는 학습된 AI 모델이 아니라 실행 가능한 D8 수문 분석 대리
-> 모델입니다. 실제 PyTorch/ONNX 모델은 `app/ai/interface.py` 규격에 맞춰 교체합니다.
+## 분석 백엔드 (AI_BACKEND)
+
+배수구 위치를 정하는 방식이 두 가지이고 `AI_BACKEND` 환경변수로 고릅니다.
+
+| 값 | 방식 | 비고 |
+|---|---|---|
+| `unet` (기본값) | 학습된 U-Net 이 예측한 배수맵에서 배수구 위치를 고름 | 체크포인트 필요 |
+| `d8` | D8 흐름누적 기반 수문 분석 | 학습 없이 항상 동작 |
+
+`unet` 으로 두더라도 torch 가 없거나 체크포인트를 찾지 못하면 **자동으로 `d8` 로 폴백**하고
+경고 로그를 남깁니다 (서버가 안 뜨는 것보다 낫기 때문). D8 흐름누적·하류 그래프는 어느 쪽이든
+원본 고도에서 계산하므로 자동 검증과 워터맵 렌더링은 그대로 유효합니다 — U-Net 이 대체하는 것은
+오직 "어디에 배수구를 둘지" 뿐입니다.
+
+### U-Net 체크포인트
+
+`app/ai/unet_infer/` 는 AI 모델 저장소
+([team_yucheital_ai_model](https://github.com/beak00hyunmin7/team_yucheital_ai_model))
+의 `terrainFlowSim/ai_model/deploy_package/src` 사본입니다. 모델이 갱신되면 그쪽에서
+다시 가져와야 합니다.
+
+**체크포인트 파일은 이 저장소에 없습니다.** 기본 경로는 이 프로젝트와 나란히 있는
+`deploy_package/checkpoints/best.pt` 이고, `AI_MODEL_CHECKPOINT` 로 바꿀 수 있습니다.
+권장 체크포인트는 `checkpoints_p2_wet8/best.pt`(125 MB)이며, 예전 v5(686 MB)보다
+모든 물리 지표에서 낫습니다.
+
+입력 채널 수·FiLM 사용 여부·조건 개수(`cond_dim`)·`ngf`·학습 해상도를 전부 체크포인트에서
+자동 판별하므로, 파일만 바꿔 끼우면 됩니다.
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `AI_MODEL_CHECKPOINT` | 형제 폴더의 `deploy_package/checkpoints/best.pt` | 체크포인트 경로 |
+| `UNET_RAIN_MM` | `60` | 예측에 쓸 강우량(mm). 학습 범위 20~80 |
+| `UNET_TIME_S` | `18` | 강우 시작 후 경과시간(s). 학습 범위 0~120 |
+
+> **경과시간 주의**: 학습 데이터는 비가 초반에 내리고 이후 빠지는 시뮬레이션이라 수심이
+> 시간에 따라 **줄어듭니다** (정답 평균 수심 t=18 s 0.039 m → t=120 s 0.019 m).
+> 120초는 가장 덜 잠긴 상태라 배수구 위치 판단에는 부적절합니다. 기본값이 18초인 이유입니다.
+
+조건을 요구하지 않는 옛 체크포인트(`cond_dim=0`)나 강우량만 받는 것(`cond_dim=1`)도
+그대로 동작합니다 — 호출부가 체크포인트가 요구하는 조건만 넘깁니다.
 
 ## 바로 실행하기: FastAPI + MySQL
 
@@ -154,10 +193,11 @@ MySQL 테이블:
 | 재학습 대기 데이터 | `GET /api/v1/training-dataset/items?status=READY` |
 | 저장 이미지 | `GET /files/analysis_cases/{id}/{filename}` |
 
-## 실제 AI 연결
+## 다른 모델로 교체하기
 
-`app/ai/interface.py`의 `DrainageModel` 규격을 구현한 뒤
+U-Net 이 아닌 다른 모델을 붙이려면 `app/ai/interface.py`의 `DrainageModel` 규격을 구현한 뒤
 `app/ai/hydrology_model.py`에서 내보내는 `model` 객체를 교체합니다.
+(U-Net 어댑터 구현 예시는 `app/ai/unet_model.py` 를 참고하세요.)
 
 필수 출력:
 
