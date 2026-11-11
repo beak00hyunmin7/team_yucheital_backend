@@ -8,3 +8,7 @@ __pycache__/
 .env
 data/
 
+
+# 예측 서버(prediction_server)
+prediction_server/.yuche_secret
+prediction_server/checkpoints/

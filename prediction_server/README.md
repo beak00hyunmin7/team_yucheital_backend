@@ -1,37 +1,100 @@
-# 예측 배수맵 웹 (webapp)
+# 예측 서버 (prediction_server)
 
-등고선을 넣으면 학습된 AI 모델(`ai_model/`)이 예측 배수맵(지표 유출 집중도)을 돌려주는 웹.
+등고선(이미지) 또는 고도 격자를 받아 학습된 AI 모델이 **예측 배수맵**(지표 유출 집중도)을 돌려주는 FastAPI 서버.
+회원가입·로그인(MySQL)과 분석 기록 저장도 여기서 한다. 정식 화면은
+[team_yucheital_frontend](https://github.com/beak00hyunmin7/team_yucheital_frontend) 가 이 서버의 API 를 부른다.
+
+> **이 저장소의 다른 서버와 헷갈리지 말 것.** 이 저장소에는 서버가 세 가지 있다.
+> | 폴더 | 무엇 | 지금 화면(frontend)이 쓰나 |
+> |---|---|---|
+> | `prediction_server/` (이 문서) | 예측 배수맵 API(`/api/predict`) + 로그인 + 기록 | **예** |
+> | `app/` | 배수구 *위치* 추천 + 자동 검증 + 재학습 후보 저장 (D8 / U-Net) | 아니오 |
+> | `backend_v2/` | 업로드 → AI 배수맵 → 사용자 배수구 → 시나리오 비교 | 아니오 |
+>
+> `app/` 과 `backend_v2/` 는 건드리지 않았다. 세 서버를 하나로 합칠지는 백엔드 담당자가 정한다.
+
+## 담당 경계
+
+| 영역 | 저장소 | 이 서버와의 관계 |
+|---|---|---|
+| AI 모델(학습·추론) | [team_yucheital_ai_model](https://github.com/beak00hyunmin7/team_yucheital_ai_model) | **서브모듈 `prediction_server/ai`** 로 가져다 쓴다. 어떤 AI 버전을 쓰는지 서브모듈 커밋으로 고정된다 |
+| 서버(API·인증·기록) | 이 저장소 | |
+| 화면 | team_yucheital_frontend | HTTP API 로만 연결. 요청/응답 약속은 아래 "응답" 절 |
+
+AI 가 새 모델/추론 코드를 내면 서브모듈 커밋을 올리는 PR 한 줄로 반영한다:
+
+```powershell
+git -C prediction_server/ai fetch
+git -C prediction_server/ai checkout <새 커밋>
+git add prediction_server/ai && git commit -m "AI 모델 코드 갱신"
+```
 
 ```
-webapp/
+prediction_server/
 ├── backend/
-│   ├── app.py            FastAPI. /api/predict + 인증 라우트 마운트
-│   ├── auth.py           회원가입/로그인 (MySQL + bcrypt + HMAC 토큰)
-│   ├── terrain_io.py     '등고선 데이터'(고도 격자) 파일 파서 (.npy/.csv/.asc/.tif ...)
-│   └── requirements.txt  웹 서버 + 인증 의존성 (torch 등은 ai_model/.venv 재사용)
-├── frontend/
-│   └── index.html        로그인 → 입력 방식·강우량 선택 UI (단일 파일, 프레임워크 없음)
-└── run_windows.bat       더블클릭 실행 (WSL MariaDB 시작 포함)
+│   ├── app.py              FastAPI. /api/predict, /api/health, /api/color-schemes, 샘플·검증 라우트
+│   ├── auth.py             회원가입/로그인 (MySQL + bcrypt + HMAC 토큰) + DB 연결 자동 복구
+│   ├── history.py          분석 기록 저장 (MySQL + 썸네일 파일)
+│   ├── contour_color.py    이미지 색 체계 → 학습 형식 변환
+│   ├── analysis_figure.py  분석 지도 렌더링
+│   ├── terrain_io.py       '등고선 데이터'(고도 격자) 파일 파서 (.npy/.csv/.asc/.tif ...)
+│   └── requirements.txt    서버 의존성
+├── ai/                     (서브모듈) team_yucheital_ai_model — 추론 코드. 체크포인트는 없음
+├── checkpoints/best.pt     (git 제외) AI 담당자에게 받는 모델 파일
+├── frontend/index.html     개발·검증용 화면(정답 비교 탭 포함). 정식 화면은 frontend 저장소
+├── tests/                  torch·DB 없이 도는 단위 테스트
+└── run_windows.bat         더블클릭 실행 (WSL MariaDB 시작 포함)
 ```
+
+## 처음 설치
+
+```powershell
+git clone --recurse-submodules https://github.com/beak00hyunmin7/team_yucheital_backend.git
+# 이미 clone 했다면: git submodule update --init prediction_server/ai
+cd team_yucheital_backend\prediction_server
+python -m venv .venv
+# torch 는 CUDA 버전에 맞는 빌드를 직접 설치: https://pytorch.org/get-started/locally/
+.venv\Scripts\pip install -r ai\terrainFlowSim\ai_model\requirements.txt
+.venv\Scripts\pip install -r backend\requirements.txt
+```
+
+- **체크포인트**: `best.pt` 는 저장소에 없다. AI 담당자에게 받아 `prediction_server/checkpoints/best.pt` 에 둔다
+  (다른 곳이면 환경변수 `AI_MODEL_CHECKPOINT`). 권장 모델은 `checkpoints_p2_wet8/best.pt`(125MB).
+- **파이썬 위치**: `run_windows.bat` 은 환경변수 `YUCHE_PYTHON` → `prediction_server\.venv` →
+  `ai\terrainFlowSim\ai_model\.venv` 순서로 찾는다. 이미 AI 쪽 venv 가 있으면 그걸 그대로 써도 된다.
+- **DB**: WSL Ubuntu 에 MariaDB (아래 "회원가입 / 로그인" 참고). DB 가 없어도 로그인 없이 예측은 된다.
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `AI_MODEL_DIR` | `prediction_server/ai/terrainFlowSim/ai_model` | AI 모델 코드 위치 |
+| `AI_MODEL_CHECKPOINT` | `prediction_server/checkpoints/best.pt` | 체크포인트 |
+| `YUCHE_SAMPLES_DIR` | `<AI_MODEL_DIR>/data/contours` | 샘플 지형 그림(학습 데이터라 저장소에 없음. 없으면 `/api/samples` 는 빈 목록) |
+| `YUCHE_DB_URL` · `YUCHE_SECRET` · `YUCHE_HISTORY_DIR` · `YUCHE_WSL_DISTRO` | 아래 각 절 | |
 
 ## 실행
 
-전제: `ai_model/.venv` 존재 + WSL Ubuntu 에 MariaDB 설치됨(아래 참고).
-
 ```bat
-webapp\run_windows.bat
+prediction_server\run_windows.bat
 ```
 
 또는 수동:
 
 ```powershell
 wsl -d Ubuntu-22.04 -u root -- service mariadb start
-cd project\terrainFlowSim\webapp
-..\ai_model\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-..\ai_model\.venv\Scripts\python.exe -m uvicorn app:app --app-dir backend --host 127.0.0.1 --port 8000
+cd prediction_server
+.venv\Scripts\python.exe -m uvicorn app:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
-브라우저에서 <http://127.0.0.1:8000> · API 문서 <http://127.0.0.1:8000/docs>
+API 문서 <http://127.0.0.1:8000/docs> · 개발·검증용 화면 <http://127.0.0.1:8000>
+
+## 테스트
+
+torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구):
+
+```powershell
+cd prediction_server
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
 ## 같은 공유기의 다른 PC·폰에서 접속
 
@@ -41,21 +104,21 @@ cd project\terrainFlowSim\webapp
 남은 건 **방화벽 1회 허용**이다. 관리자 PowerShell 에서 한 번만:
 
 ```powershell
-New-NetFirewallRule -DisplayName "yuche webapp 8000" -Direction Inbound `
+New-NetFirewallRule -DisplayName "yuche server 8000" -Direction Inbound `
   -Action Allow -Protocol TCP -LocalPort 8000 -Profile Private
 ```
 
 `-Profile Private` 이 핵심이다. 공유기 네트워크가 Windows 에서 "공용"으로 잡혀 있으면 규칙이
 안 먹으므로, 설정 > 네트워크에서 해당 연결을 **개인 네트워크**로 바꿔야 한다.
 
-되돌릴 때: `Remove-NetFirewallRule -DisplayName "yuche webapp 8000"`
+되돌릴 때: `Remove-NetFirewallRule -DisplayName "yuche server 8000"`
 이 PC 에서만 쓰려면 `run_windows.bat` 의 `set BIND=0.0.0.0` 을 `127.0.0.1` 로.
 
 ### 열기 전에 알아둘 것
 
 - **HTTP 평문이다.** 로그인 비밀번호가 같은 네트워크에서 그대로 보인다. 공용 Wi-Fi 에서는
   진짜 비밀번호를 쓰지 말 것.
-- 토큰 서명 키는 이제 기기마다 임의 생성된다(`webapp/.yuche_secret`, git 제외).
+- 토큰 서명 키는 이제 기기마다 임의 생성된다(`prediction_server/.yuche_secret`, git 제외).
   예전 고정 기본값 `dev-only-change-me` 는 이 저장소가 공개라 키가 그대로 적혀 있었고,
   서명 키를 아는 사람은 **가입 없이** 아무 이메일로나 유효한 토큰을 만들 수 있었다
   (`verify_token` 은 서명과 만료만 보고 DB 를 조회하지 않는다). 랜에 여는 이상 이건 막아야 한다.
@@ -183,7 +246,7 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
 
 ## 강우 · 시점 조건
 
-기본 체크포인트는 **`ai_model/checkpoints_p2_wet8/best.pt`** (젖은 픽셀 가중 L1, 128px/10.5M,
+권장 체크포인트는 **`checkpoints_p2_wet8/best.pt`** (`prediction_server/checkpoints/best.pt` 에 둠) (젖은 픽셀 가중 L1, 128px/10.5M,
 cond_dim=2). 화면의 두 슬라이더 값이 `rain_mm`, `time_s` 로 전달돼 예측이 실제로 달라진다.
 학습 범위는 강우 20~80mm, 경과 시간 0~120초.
 
@@ -198,7 +261,7 @@ cond_dim=2). 화면의 두 슬라이더 값이 `rain_mm`, `time_s` 로 전달돼
 구버전 체크포인트(`checkpoints_film`, cond_dim=1)로 되돌려도 그대로 뜬다 -
 이 경우 시점 슬라이더는 자동으로 숨겨진다.
 
-성능 근거는 `ai_model/IMPROVEMENT_GUIDE.md` 와 `ai_model/eval_p2_wet8/summary.md`.
+성능 근거는 AI 저장소의 `ai_model/IMPROVEMENT_GUIDE.md` 와 `ai_model/eval_p2_wet8/summary.md` (서브모듈 `prediction_server/ai` 안).
 
 ## 모델 교체
 

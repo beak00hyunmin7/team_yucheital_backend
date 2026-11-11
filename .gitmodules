@@ -1,0 +1,3 @@
+[submodule "prediction_server/ai"]
+	path = prediction_server/ai
+	url = https://github.com/beak00hyunmin7/team_yucheital_ai_model.git

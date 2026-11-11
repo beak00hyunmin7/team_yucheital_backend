@@ -16,8 +16,10 @@
   + 메타데이터
 
 모델 연결:
-  ai_model/src/inference_api.py 의 predict_from_image 를 그대로 재사용한다.
-  기본 체크포인트는 checkpoints_p2_wet8/best.pt (젖은 픽셀 가중 L1, 128px/10.5M).
+  AI 저장소(서브모듈 prediction_server/ai)의 ai_model/src/inference_api.py 의 predict_from_image 를
+  그대로 재사용한다. 체크포인트(best.pt)는 저장소에 없고 AI 담당자에게 받아
+  prediction_server/checkpoints/best.pt 에 두거나 AI_MODEL_CHECKPOINT 로 지정한다.
+  권장 체크포인트는 checkpoints_p2_wet8/best.pt (젖은 픽셀 가중 L1, 128px/10.5M).
   구버전 checkpoints_film 대비: 강우+시점 조건(cond_dim=2), 최대수심 비율 0.49->0.62,
   IoU@5cm 0.378->0.426 (ai_model/IMPROVEMENT_GUIDE.md, eval_p2_wet8/summary.md 참조).
   학습 해상도는 체크포인트에서 자동 판별하므로 AI_MODEL_IMAGE_SIZE 를 줄 필요 없다.
@@ -41,16 +43,42 @@ from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 from sqlalchemy.exc import OperationalError
 
-# --- ai_model 을 import 경로에 추가하고 기본 체크포인트를 FiLM 모델로 지정 --------
+# --- AI 모델 코드(서브모듈)를 import 경로에 추가하고 기본 체크포인트를 정한다 ----------
+# 이 서버는 AI 저장소(team_yucheital_ai_model)의 terrainFlowSim/ai_model 을 가져다 쓴다.
+# 기본 위치는 서브모듈 prediction_server/ai (커밋으로 AI 버전이 고정된다).
+# 다른 위치를 쓰려면 환경변수 AI_MODEL_DIR (= .../terrainFlowSim/ai_model).
 BACKEND_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BACKEND_DIR.parent
-AI_MODEL_DIR = WEBAPP_DIR.parent / "ai_model"
-FRONTEND_DIR = WEBAPP_DIR / "frontend"
+FRONTEND_DIR = WEBAPP_DIR / "frontend"   # 개발·검증용 화면(옛 index.html). 정식 화면은 frontend 저장소
 
+
+def _find_ai_model_dir() -> Path:
+    candidates = []
+    if os.environ.get("AI_MODEL_DIR"):
+        candidates.append(Path(os.environ["AI_MODEL_DIR"]))
+    candidates.append(WEBAPP_DIR / "ai" / "terrainFlowSim" / "ai_model")   # 서브모듈 (기본)
+    candidates.append(WEBAPP_DIR.parent / "ai_model")                      # 예전 배치(AI 저장소 안의 webapp 옆)
+    for c in candidates:
+        if (c / "src" / "inference_api.py").is_file():
+            return c.resolve()
+    raise RuntimeError(
+        "AI 모델 코드를 찾을 수 없습니다. 서브모듈을 받아 주세요:\n"
+        "  git submodule update --init prediction_server/ai\n"
+        "다른 위치를 쓰려면 환경변수 AI_MODEL_DIR 에 .../terrainFlowSim/ai_model 경로를 지정하세요.")
+
+
+def _default_checkpoint() -> Path:
+    # 체크포인트(best.pt)는 저장소에 없다. AI 담당자에게 받아 아래 중 한 곳에 두거나 AI_MODEL_CHECKPOINT 로 지정.
+    for c in (WEBAPP_DIR / "checkpoints" / "best.pt",
+              AI_MODEL_DIR / "checkpoints_p2_wet8" / "best.pt"):
+        if c.is_file():
+            return c
+    return WEBAPP_DIR / "checkpoints" / "best.pt"
+
+
+AI_MODEL_DIR = _find_ai_model_dir()
 sys.path.insert(0, str(AI_MODEL_DIR))
-os.environ.setdefault(
-    "AI_MODEL_CHECKPOINT", str(AI_MODEL_DIR / "checkpoints_p2_wet8" / "best.pt")
-)
+os.environ.setdefault("AI_MODEL_CHECKPOINT", str(_default_checkpoint()))
 
 from src.inference_api import (  # noqa: E402  (경로 설정 후 import)
     current_checkpoint,
@@ -92,7 +120,8 @@ TIME_MIN_S, TIME_MAX_S = 0.0, 120.0            # 학습 데이터가 다룬 경�
 DEFAULT_TIME_S = 18.0
 DEFAULT_DX_M = 10.4166667                       # 1000m / 96격자
 WET_THRESHOLD_M = 0.05                          # '침수'로 세는 최소 수심 (5cm). 평가 지표 IoU@5cm 와 같은 기준
-SAMPLES_DIR = AI_MODEL_DIR / "data" / "contours"
+# 샘플 지형 그림(검증·데모용). 학습 데이터라 저장소에는 없고, 있을 때만 /api/samples 가 동작한다
+SAMPLES_DIR = Path(os.environ.get("YUCHE_SAMPLES_DIR", AI_MODEL_DIR / "data" / "contours"))
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 _HEAVY_LOCK = threading.Lock()                  # matplotlib/torch 직렬화 (데모 규모)

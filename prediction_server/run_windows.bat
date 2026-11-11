@@ -1,71 +1,76 @@
 @echo off
-REM ¿¹Ãø ¹è¼ö¸Ê À¥ ½ÇÇà (Windows)
-REM   - ai_model\.venv Àç»ç¿ë
-REM   - È¸¿ø°¡ÀÔ/·Î±×ÀÎ¿ë MySQL(MariaDB)Àº WSL Ubuntu ¾È¿¡¼­ ±¸µ¿
+chcp 65001 >nul
+rem ==========================================================================
+rem  ì˜ˆì¸¡ ì„œë²„ ì‹¤í–‰ (Windows)
+rem   - íŒŒì´ì¬: YUCHE_PYTHON > prediction_server\.venv > AI ì„œë¸Œëª¨ë“ˆì˜ ai_model\.venv ìˆœì„œë¡œ ì°¾ëŠ”ë‹¤
+rem   - íšŒì›ê°€ìž…/ë¡œê·¸ì¸/ê¸°ë¡ìš© MySQL(MariaDB)ì€ WSL Ubuntu ì•ˆì—ì„œ ì‹¤í–‰í•œë‹¤
+rem   - AI ëª¨ë¸ ì½”ë“œëŠ” ì„œë¸Œëª¨ë“ˆ prediction_server\ai ì—ì„œ ê°€ì ¸ì˜¨ë‹¤ (ì—†ìœ¼ë©´ ë°›ëŠ”ë‹¤)
+rem ==========================================================================
 
 setlocal
 cd /d "%~dp0"
 
-set VENV_PY=..\ai_model\.venv\Scripts\python.exe
-if not exist "%VENV_PY%" (
-  echo [¿À·ù] ..\ai_model\.venv ¸¦ Ã£À» ¼ö ¾ø½À´Ï´Ù.
+set "PY="
+if defined YUCHE_PYTHON if exist "%YUCHE_PYTHON%" set "PY=%YUCHE_PYTHON%"
+if not defined PY if exist ".venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
+if not defined PY if exist "ai\terrainFlowSim\ai_model\.venv\Scripts\python.exe" set "PY=%~dp0ai\terrainFlowSim\ai_model\.venv\Scripts\python.exe"
+if not defined PY (
+  echo [ì˜¤ë¥˜] íŒŒì´ì¬ ê°€ìƒí™˜ê²½ì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.
+  echo        1^) prediction_server\.venv ë¥¼ ë§Œë“¤ê³  README ì˜ ì„¤ì¹˜ ìˆœì„œëŒ€ë¡œ íŒ¨í‚¤ì§€ë¥¼ ì„¤ì¹˜í•˜ê±°ë‚˜
+  echo        2^) í™˜ê²½ë³€ìˆ˜ YUCHE_PYTHON ì— python.exe ê²½ë¡œë¥¼ ì§€ì •í•˜ì„¸ìš”.
   pause
   exit /b 1
 )
 
-echo [1/4] WSL MariaDB ½ÃÀÛ...
+if not defined AI_MODEL_DIR if not exist "ai\terrainFlowSim\ai_model\src\inference_api.py" (
+  echo [ì•ˆë‚´] AI ëª¨ë¸ ì½”ë“œ^(ì„œë¸Œëª¨ë“ˆ^)ë¥¼ ë°›ìŠµë‹ˆë‹¤...
+  git -C "%~dp0.." submodule update --init prediction_server/ai
+)
+
+echo [1/4] WSL MariaDB ì‹œìž‘...
 wsl -d Ubuntu-22.04 -u root -- service mariadb start 2>nul
 if errorlevel 1 (
-  echo   (WSL/MariaDB ¾øÀ½ - ÀÎÁõ ¾øÀÌ ¿¹Ãø¸¸ µ¿ÀÛÇÕ´Ï´Ù)
+  echo   ^(WSL/MariaDB ì—†ìŒ - ë¡œê·¸ì¸ ì—†ì´ ì˜ˆì¸¡ë§Œ ê°€ëŠ¥í•©ë‹ˆë‹¤^)
 ) else (
-  REM MariaDB ´Â ±âµ¿¿¡ ¸î ÃÊ °É¸°´Ù. ¹Ù·Î ¼­¹ö¸¦ ¶ç¿ì¸é init_db °¡ ½ÇÆÐÇØ¼­
-  REM ÀÎÁõÀÌ ²¨Áø Ã¤ ¶ß°Å³ª, ÄÑÁø Ã¤ ·Î±×ÀÎÀÌ ¾È µÇ´Â ¾îÁ¤ÂÄÇÑ »óÅÂ°¡ µÈ´Ù.
-  REM ÀÀ´äÇÒ ¶§±îÁö ÃÖ´ë 20ÃÊ ±â´Ù¸°´Ù.
-  echo   MariaDB ÁØºñ ´ë±â Áß...
+  rem MariaDB ëŠ” ê¸°ë™ì— ëª‡ ì´ˆ ê±¸ë¦°ë‹¤. ë°”ë¡œ ì„œë²„ë¥¼ ë„ìš°ë©´ DB ì—†ì´ ëœ¬ ê²ƒì²˜ëŸ¼ ë³´ì¼ ìˆ˜ ìžˆì–´ ìµœëŒ€ 20ì´ˆ ê¸°ë‹¤ë¦°ë‹¤.
+  echo   MariaDB ì¤€ë¹„ ëŒ€ê¸° ì¤‘...
   for /L %%i in (1,1,20) do (
     wsl -d Ubuntu-22.04 -u root -- mysqladmin --silent ping >nul 2>&1 && goto :db_ready
     timeout /t 1 /nobreak >nul
   )
-  echo   (°æ°í: MariaDB °¡ 20ÃÊ ¾È¿¡ ÀÀ´äÇÏÁö ¾Ê¾Ò½À´Ï´Ù - ·Î±×ÀÎÀÌ ¾È µÉ ¼ö ÀÖ½À´Ï´Ù)
+  echo   ^(ê²½ê³ : MariaDB ê°€ 20ì´ˆ ì•ˆì— ì‘ë‹µí•˜ì§€ ì•Šì•˜ìŠµë‹ˆë‹¤ - ë¡œê·¸ì¸ì´ ì•ˆ ë  ìˆ˜ ìžˆìŠµë‹ˆë‹¤^)
   :db_ready
 )
 
-REM WSL2 VM Àº ¾Æ¹«µµ ¾²Áö ¾ÊÀ¸¸é ½º½º·Î Á¾·áµÇ°í, ±×¶§ VM ¾ÈÀÇ MariaDB µµ °°ÀÌ Á×´Â´Ù.
-REM (MariaDB ´Â systemd ·Î enabled µÇ¾î ÀÖ¾î¼­ VM ÀÌ ´Ù½Ã ¶ã ¶§ ÀÚµ¿ ±âµ¿µÈ´Ù - ±×·¡¼­
-REM  "wsl ¸í·ÉÀ» ¾´ Á÷ÈÄ¿¡´Â µÇ°í Á¶±Ý µÎ¸é ¾È µÇ´Â" ¸ð½ÀÀ¸·Î º¸ÀÎ´Ù.)
-REM ½ÇÃø: wsl ¸í·É Á÷ÈÄ 5/5 ¿¬°á ¼º°ø, 1~2ºÐ ¹æÄ¡ ÈÄ 20/20 ¿¬°á°ÅºÎ(WinError 10061),
-REM ±× »óÅÂ¿¡¼­ wsl ·Î µé¾î°¡ º¸¸é uptime ÀÌ "up 0 minutes" - VM ÀÌ »õ·Î ¶á °ÍÀÌ´Ù.
-REM ¼­¹ö°¡ µµ´Â µ¿¾È VM À» °è¼Ó ±ú¿ö µÑ À¯Áö¿ë ·çÇÁ¸¦ ¶ç¿î´Ù. ÀÌ°Ô ¾øÀ¸¸é ¸î ºÐ µÚ
-REM È¸¿ø°¡ÀÔ/·Î±×ÀÎÀÌ Á¶¿ëÈ÷ Á×´Â´Ù.
-echo [2/4] WSL À¯Áö¿ë ÇÁ·Î¼¼½º ½ÃÀÛ...
-rem   WSL ¾ÈÂÊ¿¡ sleep ÇÁ·Î¼¼½º¸¦ ¶ç¿öµÎ´Â °Í¸¸À¸·Î´Â ºÎÁ·ÇÏ´Ù. VM ÀÌ »ì¾Æ ÀÖ¾îµµ
-rem   Windows -> WSL ÀÇ 127.0.0.1:3306 Æ÷¿öµùÀÌ µû·Î ²÷±â±â ¶§¹®¿¡, Windows ÂÊ¿¡¼­
-rem   ÁÖ±âÀûÀ¸·Î wsl ¸í·ÉÀ» ³¯·Á VM À¯Áö¿Í Æ÷¿öµù °»½ÅÀ» µ¿½Ã¿¡ ÇÑ´Ù.
+rem WSL2 VM ì€ ìœ íœ´ ìƒíƒœë©´ ìŠ¤ìŠ¤ë¡œ ì¢…ë£Œë˜ê³ , ê·¸ë•Œ ì•ˆì˜ MariaDB ë„ ê°™ì´ ì£½ëŠ”ë‹¤. ë˜ VM ì´ ì‚´ì•„ ìžˆì–´ë„
+rem Windows -> WSL ì˜ 127.0.0.1:3306 í¬ì›Œë”©ë§Œ ë”°ë¡œ ëŠê¸¸ ìˆ˜ ìžˆë‹¤. ë‘˜ ë‹¤ Windows ì—ì„œ wsl ëª…ë ¹ì„ í•œ ë²ˆ
+rem ë‚ ë¦¬ë©´ ë˜ì‚´ì•„ë‚˜ë¯€ë¡œ, ì„œë²„ê°€ ë„ëŠ” ë™ì•ˆ 45ì´ˆë§ˆë‹¤ wsl ëª…ë ¹ì„ ë‚ ë¦¬ëŠ” ìœ ì§€ìš© ì°½ì„ ë„ìš´ë‹¤.
+rem (ì„œë²„ ì½”ë“œë„ ìš”ì²­ ì¤‘ ì—°ê²°ì´ ê±°ë¶€ë˜ë©´ auth.connect_with_recovery ê°€ WSL ì„ í•œ ë²ˆ ê¹¨ìš°ê³  ë‹¤ì‹œ ì—°ê²°í•œë‹¤)
+echo [2/4] WSL ìœ ì§€ìš© í”„ë¡œì„¸ìŠ¤ ì‹œìž‘...
 start "yuche-wsl-keepalive" /min cmd /c "for /l %%k in (1,0,2) do (wsl -d Ubuntu-22.04 -u root -- true & timeout /t 45 /nobreak >nul)"
 
-echo [3/4] À¥ ¼­¹ö ÀÇÁ¸¼º È®ÀÎ...
-"%VENV_PY%" -m pip install -q -r backend\requirements.txt
+echo [3/4] ì›¹ ì„œë²„ ì˜ì¡´ì„± í™•ì¸...
+"%PY%" -m pip install -q -r backend\requirements.txt
 
-REM °°Àº °øÀ¯±â¿¡ ¹°¸° ´Ù¸¥ PC/Æù¿¡¼­µµ µé¾î¿Ã ¼ö ÀÖ°Ô ¸ðµç ÀÎÅÍÆäÀÌ½º¿¡ ¹ÙÀÎµùÇÑ´Ù.
-REM ÀÌ PC ¿¡¼­¸¸ ¾²·Á¸é ¾Æ·¡ BIND ¸¦ 127.0.0.1 ·Î ¹Ù²Ù¸é µÈ´Ù.
-REM ¹æÈ­º®Àº ÃÖÃÊ 1È¸¸¸ ¿­¾îÁÖ¸é µÈ´Ù (°ü¸®ÀÚ PowerShell):
-REM   New-NetFirewallRule -DisplayName "yuche webapp 8000" -Direction Inbound ^
-REM     -Action Allow -Protocol TCP -LocalPort 8000 -Profile Private
+rem ê°™ì€ ê³µìœ ê¸°ì— ìžˆëŠ” ë‹¤ë¥¸ PC/í°ì—ì„œë„ ë“¤ì–´ì˜¬ ìˆ˜ ìžˆê²Œ ëª¨ë“  ì¸í„°íŽ˜ì´ìŠ¤ì— ë°”ì¸ë”©í•œë‹¤.
+rem ì´ PC ì—ì„œë§Œ ì“°ë ¤ë©´ ì•„ëž˜ BIND ë¥¼ 127.0.0.1 ë¡œ ë°”ê¾¼ë‹¤.
+rem ë°©í™”ë²½ ê·œì¹™ì€ í•œ ë²ˆë§Œ ê´€ë¦¬ìž PowerShell ë¡œ ì¶”ê°€í•˜ë©´ ëœë‹¤:
+rem   New-NetFirewallRule -DisplayName "yuche server 8000" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000 -Profile Private
 set BIND=0.0.0.0
 
 for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 ^| Where-Object { $_.PrefixOrigin -eq 'Dhcp' -and $_.IPAddress -notlike '169.254.*' } ^| Select-Object -First 1).IPAddress"`) do set LANIP=%%i
 
-echo [4/4] ¼­¹ö ½ÃÀÛ
-echo       ÀÌ PC        : http://127.0.0.1:8000
-if defined LANIP echo       °°Àº °øÀ¯±â  : http://%LANIP%:8000
-if not defined LANIP echo       (·£ ÁÖ¼Ò¸¦ ¸ø Ã£¾Ò½À´Ï´Ù - ipconfig ·Î È®ÀÎÇÏ¼¼¿ä)
+echo [4/4] ì„œë²„ ì‹œìž‘
+echo       ì´ PC        : http://127.0.0.1:8000
+if defined LANIP echo       ê°™ì€ ê³µìœ ê¸°  : http://%LANIP%:8000
+if not defined LANIP echo       ^(ëžœ ì£¼ì†Œë¥¼ ëª» ì°¾ì•˜ìŠµë‹ˆë‹¤ - ipconfig ë¡œ í™•ì¸í•˜ì„¸ìš”^)
 echo.
-if "%BIND%"=="0.0.0.0" echo       * °°Àº ³×Æ®¿öÅ©¿¡ ÀÖ´Â »ç¶÷Àº ´©±¸³ª µé¾î¿Ã ¼ö ÀÖ½À´Ï´Ù.
+if "%BIND%"=="0.0.0.0" echo       * ê°™ì€ ë„¤íŠ¸ì›Œí¬ì— ìžˆëŠ” ì‚¬ëžŒì€ ëˆ„êµ¬ë‚˜ ë“¤ì–´ì˜¬ ìˆ˜ ìžˆìŠµë‹ˆë‹¤.
 echo.
-"%VENV_PY%" -m uvicorn app:app --app-dir backend --host %BIND% --port 8000
+"%PY%" -m uvicorn app:app --app-dir backend --host %BIND% --port 8000
 
-REM ¼­¹ö°¡ ¸ØÃß¸é À¯Áö¿ë ·çÇÁµµ ´Ý´Â´Ù (¾È ´ÝÀ¸¸é WSL VM ÀÌ °è¼Ó ¸Þ¸ð¸®¸¦ Àâ°í ÀÖ´Â´Ù).
-echo Á¾·á - WSL À¯Áö¿ë ÇÁ·Î¼¼½º Á¤¸®...
+rem ì„œë²„ë¥¼ ë„ë©´ ìœ ì§€ìš© ì°½ë„ ë‹«ëŠ”ë‹¤ (ì•ˆ ë‹«ìœ¼ë©´ WSL VM ì´ ê³„ì† ë©”ëª¨ë¦¬ë¥¼ ìž¡ëŠ”ë‹¤).
+echo ì¢…ë£Œ - WSL ìœ ì§€ìš© í”„ë¡œì„¸ìŠ¤ ì •ë¦¬...
 taskkill /fi "WINDOWTITLE eq yuche-wsl-keepalive" /f >nul 2>&1
 
 endlocal
