@@ -1,0 +1,2 @@
+# prediction_server 의 Windows 배치 파일은 CRLF 여야 goto 라벨이 안전하다 (LF 만 있으면 cmd 가 라벨을 못 찾는 경우가 있다)
+prediction_server/*.bat text eol=crlf

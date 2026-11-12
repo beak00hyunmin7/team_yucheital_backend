@@ -1,0 +1,23 @@
+# 예측 서버(prediction_server) 의존성.
+#
+# torch / torchvision 은 PC 의 CUDA 버전에 맞는 빌드를 직접 설치한다 (이 파일에 넣지 않음):
+#   https://pytorch.org/get-started/locally/
+# 그 밖의 AI 모델 쪽 의존성은 서브모듈의 requirements 를 먼저 설치한다:
+#   pip install -r ai/terrainFlowSim/ai_model/requirements.txt
+# (opencv-python 은 학습/데이터 준비용이라 서버만 돌릴 땐 없어도 된다)
+
+# AI 추론 + 지도 렌더링
+numpy>=1.24
+pillow>=10.0
+scipy>=1.10
+matplotlib>=3.7
+
+# 웹 서버
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# 회원가입/로그인/기록 (MySQL)
+sqlalchemy>=2.0
+pymysql>=1.1
+bcrypt>=4.0
