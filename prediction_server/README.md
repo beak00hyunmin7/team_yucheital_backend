@@ -38,12 +38,15 @@ prediction_server/
 │   ├── contour_color.py    이미지 색 체계 → 학습 형식 변환
 │   ├── analysis_figure.py  분석 지도 렌더링
 │   ├── terrain_io.py       '등고선 데이터'(고도 격자) 파일 파서 (.npy/.csv/.asc/.tif ...)
+│   ├── lan_ip.py · show_db.py · show_users.py   랜 주소 출력 · DB 내용 보기/CSV 저장
 │   └── requirements.txt    서버 의존성
 ├── ai/                     (서브모듈) team_yucheital_ai_model — 추론 코드. 체크포인트는 없음
 ├── checkpoints/best.pt     (git 제외) AI 담당자에게 받는 모델 파일
 ├── frontend/index.html     개발·검증용 화면(정답 비교 탭 포함). 정식 화면은 frontend 저장소
 ├── tests/                  torch·DB 없이 도는 단위 테스트
-└── run_windows.bat         더블클릭 실행 (WSL MariaDB 시작 포함)
+├── run_windows.bat         더블클릭 실행 (WSL MariaDB 시작 포함)
+├── run_server.bat          더블클릭 실행 (이 PC 의 MySQL80 · DB yuche_ai_db, 팀 화면 같이 서빙)
+└── show_db.bat · show_users.bat   가입 계정·분석 기록 확인 (data/db_export/*.csv 로도 저장)
 ```
 
 ## 처음 설치
@@ -69,6 +72,7 @@ python -m venv .venv
 | `AI_MODEL_DIR` | `prediction_server/ai/terrainFlowSim/ai_model` | AI 모델 코드 위치 |
 | `AI_MODEL_CHECKPOINT` | `prediction_server/checkpoints/best.pt` | 체크포인트 |
 | `YUCHE_SAMPLES_DIR` | `<AI_MODEL_DIR>/data/contours` | 샘플 지형 그림(학습 데이터라 저장소에 없음. 없으면 `/api/samples` 는 빈 목록) |
+| `YUCHE_SITE_DIR` | (없음) | 팀 화면 폴더(`…/yuche_frontend`). 지정하면 `/`·`/vtkjs.html`·`/style.css` 로 화면까지 내줘서 주소 하나(`:8000`)로 화면 + API. 이때 개발·검증용 화면은 `/test` |
 | `YUCHE_DB_URL` · `YUCHE_SECRET` · `YUCHE_HISTORY_DIR` · `YUCHE_WSL_DISTRO` | 아래 각 절 | |
 
 ## 실행
@@ -76,6 +80,9 @@ python -m venv .venv
 ```bat
 prediction_server\run_windows.bat
 ```
+
+DB 를 WSL MariaDB 대신 이 PC 의 MySQL80 으로 쓰고 화면까지 같이 열려면 `run_server.bat`
+(DB 이름 `yuche_ai_db`, 화면 폴더는 이 저장소 옆에 clone 한 프론트 저장소를 찾고, 다르면 `YUCHE_SITE_DIR` 로 지정).
 
 또는 수동:
 
@@ -286,6 +293,8 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
   "analysis_png_base64":  "…",   // terrain 모드: 제목·컬러바가 있는 분석 지도
   "map_jpg_base64":       "…",   // terrain 모드: 제목·컬러바·별표 없는 정사각 지도(JPEG). 웹 화면이 꽉 채워 쓰고 배수구 후보는 HTML 로 얹는다
   "stats": { "max_depth_cm": 27.3, "wet_area_pct": 20.3, "wet_threshold_cm": 5.0 },   // 지도 위 요약 칩
+  "grid3d": { "n": 96, "height_u16": "…", "depth_u16": "…", "depth_unit_m": 0.0001, "max_depth_m": 0.14, "relief_m": null, "extent_m": null },
+                                 // 웹 화면 3D 보기용. 96×96 높이(0..1 × 65535)·수심(depth_unit_m 단위) uint16 리틀엔디언 base64, 0행 = 위쪽. 만들지 못하면 null
   "drain_candidate": { "pixel": {…}, "normalized": {…}, "image": { "x": 0.61, "y": 0.35 } },
   "checkpoint": "best.pt",
   "meta": { "mode": "...", "grid_shape": [...], "rain_mm": 45.0, ... }
