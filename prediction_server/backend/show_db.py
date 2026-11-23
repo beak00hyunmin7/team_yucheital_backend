@@ -9,12 +9,14 @@ from pathlib import Path
 
 import pymysql
 
-DB = "yuche_ai_db"
+import db_config  # 접속 정보는 prediction_server/.env (비밀번호를 코드에 적지 않음)
+
+DB = db_config.db_name()
 OUT = Path(__file__).resolve().parent.parent / "data" / "db_export"
 OUT.mkdir(parents=True, exist_ok=True)
 MAXW = 40   # 화면에서 한 칸 최대 글자 수
 
-c = pymysql.connect(host="127.0.0.1", user="root", password="1234", database=DB, charset="utf8mb4")
+c = pymysql.connect(**db_config.pymysql_kwargs())
 cur = c.cursor()
 cur.execute("SHOW TABLES")
 tables = [t[0] for t in cur.fetchall()]
