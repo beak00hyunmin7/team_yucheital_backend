@@ -512,7 +512,14 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"파일이 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 를 초과합니다.")
 
-    rain_mm = float(np.clip(rain_mm, 0.0, 500.0))
+    # 사용자에게 보여줄 주의 문구 (응답의 "warnings"). 화면은 결과 안내와 알림으로 띄운다.
+    warns: list[str] = []
+    # 예전엔 0~500 mm 를 그대로 받고 모델 안에서 조용히 20~80 으로 잘려서, 응답에는 원래 값이 찍혔다
+    rain_in = float(rain_mm)
+    rain_mm = float(np.clip(rain_in, RAIN_MIN_MM, RAIN_MAX_MM))
+    if rain_mm != rain_in:
+        warns.append(f"강우량 {rain_in:g} mm 는 학습 범위({RAIN_MIN_MM:g}~{RAIN_MAX_MM:g} mm) 밖이라 "
+                     f"{rain_mm:g} mm 로 계산했습니다.")
     time_s = float(np.clip(time_s, TIME_MIN_S, TIME_MAX_S))
     meta: dict = {"mode": mode, "filename": file.filename}
     tm.mark("업로드읽기")
@@ -526,6 +533,10 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(422, f"이미지를 열 수 없습니다: {exc}") from exc
             meta["source_format"] = "contour_image"
+            iw, ih = contour_img.size
+            if max(iw, ih) / max(min(iw, ih), 1) > 1.2:
+                warns.append(f"그림이 정사각형이 아닙니다({iw}x{ih}). 모델은 정사각형 지형으로 학습되어 "
+                             "정사각형으로 늘려서 예측하므로 모양이 찌그러질 수 있습니다. 정사각형으로 잘라서 넣는 것을 권장합니다.")
 
             # 모델은 색을 곧 높이로 읽는다. 학습 때 쓴 terrain 색 체계가 아니면 높낮이가
             # 뒤집혀 나오므로, 색을 높이로 복원해 학습 형식으로 다시 그려서 넣는다.
@@ -563,6 +574,10 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             meta.update(tmeta)
             effective_dx = float(tmeta.get("cellsize_m") or dx)
             meta["dx_m"] = effective_dx
+            warns.extend(tmeta.get("warnings") or [])
+            # 셀 크기를 파일에서 읽었으면 축소 후 격자·셀 크기가 서로 맞고, 아니면 입력한 셀 크기는 원본 격자 기준이다
+            dom_shape = terrain.shape if tmeta.get("cellsize_m") else tuple(tmeta.get("original_shape") or terrain.shape)
+            warns.extend(_domain_warnings(dom_shape, effective_dx, bool(tmeta.get("cellsize_m"))))
             tm.mark("파일읽기")
             contour_img = _render_contour(terrain, effective_dx)
             tm.mark("등고선그리기")
@@ -657,7 +672,8 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
                           effective_dx if mode == "terrain" else None),
         "drain_candidate": drain,
         "checkpoint": os.path.basename(str(current_checkpoint())),
-        "meta": meta,
+        "meta": {**meta, "warnings": warns},
+        "warnings": warns,
         "notes": [
             "예측 배수맵은 색이 진한(파란) 곳일수록 지표 유출수가 모이는 침수·배수 취약 지점입니다.",
             "모델은 학습 데이터와 같은 스타일의 등고선(채색 20단계 + 검은 등고선)에서 가장 정확합니다.",
@@ -737,6 +753,30 @@ def _grid3d(contour_img: Image.Image, pred_img: Image.Image,
     except Exception as exc:  # noqa: BLE001  (3D 는 부가 기능: 실패해도 예측 결과는 그대로 준다)
         print(f"[grid3d] 3D 격자를 만들지 못했습니다: {exc!r}")
         return None
+
+
+TRAIN_EXTENT_M = 1000.0            # 학습 지형 한 변 (96칸 x 10.42 m)
+
+
+def _domain_warnings(shape: tuple[int, int], dx: float, dx_from_file: bool) -> list[str]:
+    """학습 데이터 범위(1 km 정사각 지형)에서 벗어난 입력이면 알린다.
+
+    모델은 축척을 모른다: 서버가 고도를 0~1 로 맞춰 등고선 그림을 그리므로, 100 m 지도든 10 km 지도든
+    1 km 지형으로 보고 예측한다. 그래서 크기가 많이 다르면 결과를 그대로 믿으면 안 된다.
+    """
+    out: list[str] = []
+    h, w = shape
+    extent = max(h, w) * dx
+    basis = "파일에 적힌 셀 크기" if dx_from_file else "입력한 셀 크기"
+    if not (TRAIN_EXTENT_M * 0.5 <= extent <= TRAIN_EXTENT_M * 2.0):
+        size = f"{extent / 1000:.1f} km" if extent >= 1000 else f"{extent:.0f} m"
+        out.append(f"지도 한 변이 약 {size}입니다({basis} {dx:.3g} m 기준). 모델은 1 km 지형으로 학습되어 "
+                   "축척을 구분하지 못하므로 결과가 실제와 다를 수 있습니다. 1 km 안팎으로 잘라서 넣는 것을 권장합니다.")
+    if min(h, w) < 32:
+        out.append(f"격자가 {h}x{w} 칸으로 작아서 결과가 뭉개질 수 있습니다(학습 격자 96x96).")
+    if max(h, w) / max(min(h, w), 1) > 1.2:
+        out.append(f"지도가 정사각형이 아닙니다({h}x{w}). 모델은 정사각형 지형으로 학습되어 가장자리 결과가 부정확할 수 있습니다.")
+    return out
 
 
 def _render_contour(terrain: np.ndarray, dx: float) -> Image.Image:
