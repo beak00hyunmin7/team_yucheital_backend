@@ -29,15 +29,21 @@ import logging as _logging
 _logging.getLogger("matplotlib.font_manager").setLevel(_logging.ERROR)
 matplotlib.rcParams["figure.facecolor"] = "white"
 
-UPSCALE = 4
+UPSCALE = 4                 # 최대 배율 (96 격자 -> 384)
+OUT_PX = 1125               # 분석 지도 출력 한 변 (7.5in x 150dpi). 이보다 크게 키워도 화면에 안 보인다
 
 
-def _up(arr, order=3):
-    return zoom(arr, UPSCALE, order=order)
+def _factor(n: int) -> int:
+    """격자 한 변 n 에 맞는 확대 배율. 96 -> 4(지금과 같음), 512 -> 3."""
+    return max(1, min(UPSCALE, -(-OUT_PX // n)))
 
 
-def _scale_bar(ax, dx, n, length_m=200):
-    bar = length_m / dx * UPSCALE
+def _up(arr, f, order=3):
+    return zoom(arr, f, order=order)
+
+
+def _scale_bar(ax, dx, n, f, length_m=200):
+    bar = length_m / dx * f
     x0, y0 = n * 0.05, n * 0.04
     ax.plot([x0, x0 + bar], [y0, y0], color="black", lw=3, solid_capstyle="butt", zorder=6)
     for xx in (x0, x0 + bar):
@@ -64,8 +70,9 @@ def render_analysis_figure(
     mark_idx: tuple[int, int] | None = None,
 ) -> bytes:
     """terrain, intensity: 같은 shape (H, W). mark_idx: (row, col) 배수구 후보."""
-    bg = _up(intensity.astype(float))
-    terr = _up(terrain.astype(float))
+    f = _factor(max(terrain.shape))
+    bg = _up(intensity.astype(float), f)
+    terr = _up(terrain.astype(float), f)
     n = bg.shape[0]
 
     fig, ax = plt.subplots(figsize=(7.5, 7.5))
@@ -82,7 +89,7 @@ def render_analysis_figure(
     ax.clabel(cs, cs.levels[::2], inline=True, fontsize=7, fmt="%.0fm")
 
     if mark_idx is not None:
-        my, mx = mark_idx[0] * UPSCALE, mark_idx[1] * UPSCALE
+        my, mx = mark_idx[0] * f, mark_idx[1] * f
         ax.scatter([mx], [my], c="red", s=220, marker="*", edgecolors="white",
                    linewidths=1.2, zorder=6)
         # 라벨은 항상 중앙 쪽으로 오프셋 (모서리에서 잘리거나 방위표와 겹치지 않게)
@@ -93,7 +100,7 @@ def render_analysis_figure(
                     color="red", fontsize=11, fontweight="bold", zorder=7, ha=ha,
                     arrowprops=dict(arrowstyle="->", color="red", lw=1.5))
 
-    _scale_bar(ax, dx, n)
+    _scale_bar(ax, dx, n, f)
     _north(ax, n)
     ax.set_title(title if not subtitle else f"{title}\n{subtitle}",
                  fontsize=13, fontweight="bold", pad=12)
@@ -116,8 +123,9 @@ def render_map_only(terrain: np.ndarray, intensity: np.ndarray, size: int = 900)
     웹 화면이 지도를 꽉 채워 보여주고 배수구 후보 표시·범례·축척은 HTML 로 얹기 위한 용도다.
     별표를 그림에 굽지 않아야 화면의 빨간 원(비율 좌표)과 겹치지 않는다.
     """
-    bg = _up(intensity.astype(float))
-    terr = _up(terrain.astype(float))
+    f = _factor(max(terrain.shape))
+    bg = _up(intensity.astype(float), f)
+    terr = _up(terrain.astype(float), f)
     fig = plt.figure(figsize=(7.5, 7.5), dpi=size / 7.5)
     ax = fig.add_axes([0, 0, 1, 1])
     ls = LightSource(azdeg=315, altdeg=45)
