@@ -28,11 +28,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -140,6 +142,42 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],   # 기록 이름변경/삭제(PATCH/DELETE) 허용
     allow_headers=["*"],
 )
+# --- [timing] 속도 점검용 시간 로그 (2026-11 마무리 점검) -------------------------------
+# 끄려면 환경변수 YUCHE_TIMING=0. 동작은 바꾸지 않고 터미널에 시간만 찍는다.
+TIMING_ON = os.environ.get("YUCHE_TIMING", "1") != "0"
+
+
+class _StepTimer:
+    """predict 안에서 단계별 걸린 시간을 모았다가 한 줄로 찍는다."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.t0 = self.last = time.perf_counter()
+        self.steps: list[tuple[str, float]] = []
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.steps.append((name, now - self.last))
+        self.last = now
+
+    def report(self) -> None:
+        if not TIMING_ON:
+            return
+        total = time.perf_counter() - self.t0
+        parts = " | ".join(f"{n} {d:.2f}s" for n, d in self.steps)
+        print(f"[timing] predict {self.label} | {parts} | 합계 {total:.2f}s", flush=True)
+
+
+@app.middleware("http")
+async def _timing_middleware(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    if TIMING_ON and request.url.path.startswith("/api/"):
+        print(f"[timing] {request.method} {request.url.path} -> {response.status_code} "
+              f"서버 전체 {time.perf_counter() - t0:.2f}s", flush=True)
+    return response
+
+
 @app.exception_handler(cc.ColorSchemeError)
 async def _unreadable_image(_request: Request, exc: cc.ColorSchemeError) -> JSONResponse:
     """색에서 높이를 읽을 수 없는 이미지(지형도·스캔 도면 등).
@@ -425,22 +463,50 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
         raise
 
 
+# [속도 개선 2026-11] async def -> def + 예측은 한 번에 하나씩.
+# - 안에서 하는 일(색 변환·AI 추론·그림 그리기)이 전부 동기 계산이라, async 로 두면 예측 하나를
+#   계산하는 동안 서버 전체(로그인·기록 저장 등)가 멈췄다. def 로 두면 FastAPI 가 스레드에서
+#   돌려서 가벼운 요청은 기다리지 않는다.
+# - 대신 예측끼리는 _PREDICT_LOCK 으로 한 번에 하나씩 처리한다. 둘을 동시에 돌리면 파이썬(GIL)에서
+#   계산 스레드끼리 CPU 를 뺏고 뺏기느라 오히려 느려졌다(데이터 모드 첫 화면 3.4초 -> 6~7초 실측).
+#   순서대로 하면 뒤 요청이 앞 요청의 색 변환 캐시도 그대로 쓴다.
+_PREDICT_LOCK = threading.Lock()
+
+
 @app.post("/api/predict")
-async def predict(
+def predict(
     mode: str = Form(...),
     rain_mm: float = Form(50.0),
     time_s: float = Form(DEFAULT_TIME_S),
     dx: float = Form(DEFAULT_DX_M),
     color_scheme: str = Form(cc.AUTO),
     reverse: bool = Form(False),
+    light: bool = Form(False),
+    no_analysis: bool = Form(False),
+    no_map: bool = Form(False),
     file: UploadFile = File(...),
     _user: str | None = Depends(_auth_gate),
 ) -> dict:
+    # no_analysis / no_map (데이터 모드만 의미 있음): 첫 화면은 '사용자 시점' 요청과 '배수구 기준 시점(18초)'
+    # 요청을 같이 보내는데, 화면은 앞 요청의 지도(map)와 뒤 요청의 분석 지도(analysis)만 쓴다.
+    # 쓰지 않는 그림을 빼달라는 표시. 기본값 False 라 보내지 않으면 지금처럼 둘 다 그린다.
+    with _PREDICT_LOCK:
+        return _predict(mode, rain_mm, time_s, dx, color_scheme, reverse,
+                        light or no_analysis, light or no_map, light, file)
+
+
+def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
+             reverse: bool, skip_analysis: bool, skip_map: bool, light: bool,
+             file: UploadFile) -> dict:
+    # light=True: 시간 변화(타임랩스)용 요청. 화면이 오버레이·3D 격자만 쓰므로
+    # 데이터 모드의 분석 지도·지도 그림(요청당 약 1.4초)을 건너뛴다. 기본값 False 라 기존 화면은 그대로.
     if mode not in {"image", "terrain"}:
         raise HTTPException(400, "mode 는 'image' 또는 'terrain' 이어야 합니다.")
 
-    raw = await file.read(MAX_UPLOAD_BYTES + 1)
-    await file.close()
+    tag = " light" if light else (" -분석지도" if skip_analysis else "") + (" -지도" if skip_map else "")
+    tm = _StepTimer(f"{mode} t={time_s:g}s{tag}")
+    raw = file.file.read(MAX_UPLOAD_BYTES + 1)
+    file.file.close()
     if not raw:
         raise HTTPException(400, "빈 파일입니다.")
     if len(raw) > MAX_UPLOAD_BYTES:
@@ -449,6 +515,7 @@ async def predict(
     rain_mm = float(np.clip(rain_mm, 0.0, 500.0))
     time_s = float(np.clip(time_s, TIME_MIN_S, TIME_MAX_S))
     meta: dict = {"mode": mode, "filename": file.filename}
+    tm.mark("업로드읽기")
     color_info: dict | None = None
     original_img: Image.Image | None = None
 
@@ -462,8 +529,19 @@ async def predict(
 
             # 모델은 색을 곧 높이로 읽는다. 학습 때 쓴 terrain 색 체계가 아니면 높낮이가
             # 뒤집혀 나오므로, 색을 높이로 복원해 학습 형식으로 다시 그려서 넣는다.
+            # [속도 개선 2026-11] 같은 그림이 시간 변화용으로 6~7번 연달아 오는데, 색 체계 판별·변환이
+            # 요청마다 약 2초씩 걸렸다. 결과는 그림·색 체계·반전 여부로만 정해지므로 기억해 두고 재사용한다.
+            # 캐시 확인도 잠금 안에서 한다: 화면이 첫 예측과 기준 시점(18초) 예측을 동시에 보내므로,
+            # 밖에서 확인하면 두 요청이 같은 변환을 둘 다 계산한다. 안에서 확인하면 뒤 요청은 앞 요청이
+            # 끝나길 기다렸다가 결과를 그대로 쓴다.
+            conv_key = (hashlib.md5(raw).hexdigest(), color_scheme, bool(reverse))
             with _HEAVY_LOCK:   # ColorSchemeError 는 위 핸들러가 code=unreadable_image 로 422 응답
-                conv = cc.convert_to_training_style(contour_img, color_scheme, reverse)
+                conv = _CONV_CACHE.get(conv_key)
+                if conv is None:
+                    conv = cc.convert_to_training_style(contour_img, color_scheme, reverse)
+                    if len(_CONV_CACHE) >= _CONV_CACHE_MAX:
+                        _CONV_CACHE.pop(next(iter(_CONV_CACHE)))
+                    _CONV_CACHE[conv_key] = conv
             if conv.converted:
                 original_img = contour_img
                 contour_img = conv.image
@@ -479,12 +557,15 @@ async def predict(
             }
             meta["color_scheme"] = conv.scheme
             meta["color_reversed"] = conv.reversed
+            tm.mark("이미지열기+색변환")
         else:
             terrain, tmeta = load_terrain(raw, file.filename or "upload")
             meta.update(tmeta)
             effective_dx = float(tmeta.get("cellsize_m") or dx)
             meta["dx_m"] = effective_dx
+            tm.mark("파일읽기")
             contour_img = _render_contour(terrain, effective_dx)
+            tm.mark("등고선그리기")
 
         # 체크포인트가 요구하는 조건만 넘긴다 (0=없음, 1=rain, 2=rain+time).
         cond_dim = _safe_cond_dim()
@@ -500,7 +581,9 @@ async def predict(
 
         with _HEAVY_LOCK:
             pred_img = predict_from_image(contour_img, **cond_kwargs)
+        tm.mark("AI추론")
         overlay_img = _make_overlay(contour_img, pred_img)
+        tm.mark("오버레이")
 
         # 등고선 데이터 모드에서만: 실제 등고선(m) + 음영기복 + 축척 + 배수구 후보 지도
         analysis_b64 = None
@@ -515,13 +598,17 @@ async def predict(
                 r, c = np.unravel_index(int(np.argmax(inten)), inten.shape)
                 # 제목은 "AI 예측 배수맵" 한 줄만 둔다 (조건 부제목은 길어서 그림 밖으로 잘렸다.
                 # 강우·시간 조건은 웹 화면 결과 설명에 이미 나온다)
-                png = render_analysis_figure(
+                png = None if skip_analysis else render_analysis_figure(
                     terrain, inten, effective_dx,
                     mark_idx=(int(r), int(c)),
                 )
-            analysis_b64 = base64.b64encode(png).decode("ascii")
-            with _HEAVY_LOCK:
-                map_b64 = base64.b64encode(render_map_only(terrain, inten)).decode("ascii")
+            if not skip_analysis:
+                analysis_b64 = base64.b64encode(png).decode("ascii")
+                tm.mark("분석지도")
+            if not skip_map:
+                with _HEAVY_LOCK:
+                    map_b64 = base64.b64encode(render_map_only(terrain, inten)).decode("ascii")
+                tm.mark("지도")
             h, w = terrain.shape
             drain = {
                 "pixel": {"x": int(c), "y": int(r)},
@@ -548,6 +635,7 @@ async def predict(
             "wet_area_pct": round(float((depth_grid > WET_THRESHOLD_M).mean()) * 100.0, 1),
             "wet_threshold_cm": WET_THRESHOLD_M * 100.0,
         }
+        tm.mark("배수구+통계")
 
     except InvalidTerrainData as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -556,7 +644,7 @@ async def predict(
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    return {
+    result = {
         "contour_png_base64": _b64(contour_img),
         "original_png_base64": _b64(original_img) if original_img is not None else None,
         "color_info": color_info,
@@ -576,6 +664,9 @@ async def predict(
             "경과 시간이 짧을수록 물이 많습니다 - 비가 초반에 내리고 이후 빠지는 시뮬레이션이라, 가장 심한 상태는 20초 부근입니다.",
         ],
     }
+    tm.mark("응답만들기(그림base64+3D)")
+    tm.report()
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -583,6 +674,8 @@ async def predict(
 # --------------------------------------------------------------------------- #
 GRID3D_N = 96                       # 3D 보기용 격자 한 변 (학습 격자와 같은 96)
 _HEIGHT_CACHE: dict[str, np.ndarray] = {}   # 시점별 예측(같은 지형 6~7번 요청)에서 높이 복원을 한 번만 하도록
+_CONV_CACHE: dict = {}              # (그림 md5, 색 체계, 반전) -> cc.Conversion. 시간 변화 요청마다 색 변환을 다시 하지 않도록
+_CONV_CACHE_MAX = 16
 
 
 def _u16_b64(arr01: np.ndarray, scale: float) -> str:
@@ -617,15 +710,16 @@ def _grid3d(contour_img: Image.Image, pred_img: Image.Image,
         else:
             small = contour_img.convert("RGB").resize((cc.WORK_SIZE, cc.WORK_SIZE), Image.BILINEAR)
             key = hashlib.md5(small.tobytes()).hexdigest()
-            h = _HEIGHT_CACHE.get(key)
-            if h is None:
-                hh, _frac = cc._to_height(contour_img, "terrain")
-                # 채색이 20단계라 계단처럼 읽힌다 -> 살짝 뭉개서 완만한 면으로 만든다
-                hh = gaussian_filter(hh.astype(np.float32), sigma=cc.WORK_SIZE / n * 1.6)
-                h = np.asarray(Image.fromarray(hh).resize((n, n), Image.BILINEAR), dtype=np.float64)
-                if len(_HEIGHT_CACHE) >= 8:
-                    _HEIGHT_CACHE.pop(next(iter(_HEIGHT_CACHE)))
-                _HEIGHT_CACHE[key] = h
+            with _HEAVY_LOCK:   # 동시에 온 같은 그림 요청이 높이 복원을 두 번 하지 않도록 (위 색 변환 캐시와 같은 이유)
+                h = _HEIGHT_CACHE.get(key)
+                if h is None:
+                    hh, _frac = cc._to_height(contour_img, "terrain")
+                    # 채색이 20단계라 계단처럼 읽힌다 -> 살짝 뭉개서 완만한 면으로 만든다
+                    hh = gaussian_filter(hh.astype(np.float32), sigma=cc.WORK_SIZE / n * 1.6)
+                    h = np.asarray(Image.fromarray(hh).resize((n, n), Image.BILINEAR), dtype=np.float64)
+                    if len(_HEIGHT_CACHE) >= 8:
+                        _HEIGHT_CACHE.pop(next(iter(_HEIGHT_CACHE)))
+                    _HEIGHT_CACHE[key] = h
         lo, hi = float(h.min()), float(h.max())
         hn = (h - lo) / (hi - lo) if hi - lo > 1e-9 else np.zeros_like(h)
 

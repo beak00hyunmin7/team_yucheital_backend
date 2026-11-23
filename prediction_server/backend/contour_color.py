@@ -90,7 +90,14 @@ def _lut(name: str) -> np.ndarray:
 def _nearest(arr: np.ndarray, lut: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """각 픽셀의 최근접 LUT 색 -> (값 0..1, 거리). arr: (H,W,3) 0..1."""
     h, w, _ = arr.shape
-    flat = arr.reshape(-1, 3)
+    flat = np.ascontiguousarray(arr.reshape(-1, 3))
+    # [속도 개선 2026-11] 등고선 그림은 색 종류가 적다(256x256 = 6.5만 픽셀 중 보통 수천 색).
+    # 같은 색끼리 묶어 서로 다른 색만 계산한 뒤 되돌려 놓는다. 결과는 픽셀별 계산과 완전히 같다.
+    uniq, inverse = np.unique(flat, axis=0, return_inverse=True)
+    if len(uniq) < len(flat):
+        u_val, u_d = _nearest(uniq[None, :, :], lut)
+        inverse = inverse.reshape(-1)
+        return u_val.reshape(-1)[inverse].reshape(h, w), u_d.reshape(-1)[inverse].reshape(h, w)
     out_idx = np.empty(len(flat), dtype=np.int32)
     out_d = np.empty(len(flat), dtype=np.float32)
     step = 16384
