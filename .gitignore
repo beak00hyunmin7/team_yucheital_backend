@@ -12,3 +12,7 @@ data/
 # 예측 서버(prediction_server)
 prediction_server/.yuche_secret
 prediction_server/checkpoints/
+
+# 테스트 입력 파일 (make_test_input.py / make_all_test_inputs.py 출력)
+prediction_server/test_input_one/
+prediction_server/test_input/

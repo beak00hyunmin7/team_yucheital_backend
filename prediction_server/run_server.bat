@@ -22,7 +22,12 @@ if not defined AI_MODEL_DIR if not exist "ai\terrainFlowSim\ai_model\src\inferen
   git -C "%~dp0.." submodule update --init prediction_server/ai
 )
 
-set "YUCHE_DB_URL=mysql+pymysql://root:1234@127.0.0.1:3306/yuche_ai_db?charset=utf8mb4"
+REM DB password: prediction_server\.env (copy .env.example to .env and edit). Not stored in this file.
+if not exist ".env" (
+  echo [ERROR] prediction_server\.env not found. Copy .env.example to .env and set YUCHE_DB_PASSWORD.
+  pause
+  exit /b 1
+)
 REM frontend folder. Set YUCHE_SITE_DIR before running to override.
 REM default: the frontend repo cloned next to this backend repo (team_yucheital_frontend or sejong_yucheital_project)
 if not defined YUCHE_SITE_DIR if exist "%~dp0..\..\team_yucheital_frontend\project_yucheital\yuche_frontend\vtkjs.html" set "YUCHE_SITE_DIR=%~dp0..\..\team_yucheital_frontend\project_yucheital\yuche_frontend"
@@ -30,9 +35,8 @@ if not defined YUCHE_SITE_DIR set "YUCHE_SITE_DIR=%~dp0..\..\sejong_yucheital_pr
 if not exist "%YUCHE_SITE_DIR%\vtkjs.html" echo [WARN] frontend folder not found: %YUCHE_SITE_DIR%
 
 echo [1/3] MySQL80 database...
-"%PY%" -c "import pymysql; c=pymysql.connect(host='127.0.0.1',user='root',password='1234'); c.cursor().execute('CREATE DATABASE IF NOT EXISTS yuche_ai_db CHARACTER SET utf8mb4'); c.commit(); print('  DB ready: yuche_ai_db')"
+"%PY%" backend\db_config.py --create-db
 if errorlevel 1 (
-  echo [ERROR] Cannot connect to MySQL. Check that the MySQL80 service is running.
   pause
   exit /b 1
 )

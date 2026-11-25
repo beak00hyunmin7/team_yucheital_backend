@@ -1,7 +1,9 @@
 """yuche_ai_db 의 가입 계정과 사용자별 분석 기록 수를 보여준다 (비밀번호 해시는 출력하지 않음)."""
 import pymysql
 
-c = pymysql.connect(host="127.0.0.1", user="root", password="1234", database="yuche_ai_db", charset="utf8mb4")
+import db_config  # 접속 정보는 prediction_server/.env (비밀번호를 코드에 적지 않음)
+
+c = pymysql.connect(**db_config.pymysql_kwargs())
 cur = c.cursor()
 cur.execute("""
     SELECT u.id, u.email, u.created_at, COUNT(h.id)
@@ -9,7 +11,7 @@ cur.execute("""
     GROUP BY u.id, u.email, u.created_at ORDER BY u.id
 """)
 rows = cur.fetchall()
-print(f"\n  yuche_ai_db.users : {len(rows)} accounts\n")
+print(f"\n  {db_config.db_name()}.users : {len(rows)} accounts\n")
 print(f"  {'id':>4}  {'email':<36} {'joined':<20} records")
 print("  " + "-" * 72)
 for i, email, created, n in rows:

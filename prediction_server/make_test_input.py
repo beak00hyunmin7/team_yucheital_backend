@@ -11,9 +11,10 @@ matplotlib terrain 20단계 + 검은 등고선)로 그린다. 이 스타일에�
 지형 규격은 학습 데이터(OpenFOAM)에 맞췄다:
   96x96 격자, dx 10.4167 m (=1km), 고도 60~103 m, 고저차 20 m 안팎.
 
-사용법 (webapp/ 에서):
-    ..\\ai_model\\.venv\\Scripts\\python.exe make_test_input.py
-    ..\\ai_model\\.venv\\Scripts\\python.exe make_test_input.py --seed 7 --relief 35
+사용법 (prediction_server 폴더에서):
+    .venv\\Scripts\\python.exe make_test_input.py --out C:\\yuche\\test_input_one
+    .venv\\Scripts\\python.exe make_test_input.py --seed 7 --relief 35
+(확장자 12종 + 에러 입력까지 한꺼번에 만들려면 make_all_test_inputs.py)
 """
 
 import os
@@ -25,7 +26,11 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter, zoom
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AI_MODEL = os.path.abspath(os.path.join(HERE, "..", "ai_model"))
+# AI 모델 코드: 서브모듈(prediction_server/ai/...) -> 환경변수 AI_MODEL_DIR -> 예전 위치(../ai_model)
+AI_MODEL = os.environ.get("AI_MODEL_DIR") or next(
+    (p for p in (os.path.join(HERE, "ai", "terrainFlowSim", "ai_model"), os.path.join(HERE, "..", "ai_model"))
+     if os.path.isdir(os.path.join(p, "src"))), os.path.join(HERE, "ai", "terrainFlowSim", "ai_model"))
+AI_MODEL = os.path.abspath(AI_MODEL)
 sys.path.insert(0, AI_MODEL)
 
 for _s in (sys.stdout, sys.stderr):
@@ -106,8 +111,8 @@ def main():
     p.add_argument("--seed", type=int, default=20260916)
     p.add_argument("--base", type=float, default=68.0, help="기준 고도 [m]")
     p.add_argument("--relief", type=float, default=24.0, help="고저차 [m]")
-    p.add_argument("--out", default=os.path.join(HERE, "..", "..", "..", "테스트_입력"),
-                   help="출력 폴더 (기본: 유체이탈/테스트_입력)")
+    p.add_argument("--out", default=os.path.join(HERE, "test_input_one"),
+                   help="출력 폴더 (기본: prediction_server/test_input_one)")
     p.add_argument("--name", default="test_terrain")
     args = p.parse_args()
 

@@ -4,14 +4,56 @@
 회원가입·로그인(MySQL)과 분석 기록 저장도 여기서 한다. 정식 화면은
 [team_yucheital_frontend](https://github.com/beak00hyunmin7/team_yucheital_frontend) 가 이 서버의 API 를 부른다.
 
-> **이 저장소의 다른 서버와 헷갈리지 말 것.** 이 저장소에는 서버가 세 가지 있다.
-> | 폴더 | 무엇 | 지금 화면(frontend)이 쓰나 |
-> |---|---|---|
-> | `prediction_server/` (이 문서) | 예측 배수맵 API(`/api/predict`) + 로그인 + 기록 | **예** |
-> | `app/` | 배수구 *위치* 추천 + 자동 검증 + 재학습 후보 저장 (D8 / U-Net) | 아니오 |
-> | `backend_v2/` | 업로드 → AI 배수맵 → 사용자 배수구 → 시나리오 비교 | 아니오 |
->
-> `app/` 과 `backend_v2/` 는 건드리지 않았다. 세 서버를 하나로 합칠지는 백엔드 담당자가 정한다.
+> 예전 서버(`app/` 배수구 위치 추천, `backend_v2/` 시나리오 비교)는 2026-11-23 저장소에서 삭제했다.
+> 지금 화면이 쓰는 서버는 이 폴더 하나다. 필요하면 git 기록(커밋 `c885e91`)에서 되살릴 수 있다.
+
+## 빠른 시작 (Windows, 처음 한 번)
+
+1. **MySQL 8 설치**: MySQL Installer 로 *Server only* 설치, 포트 3306, root 비밀번호를 정해서 적어 둔다.
+   "Start the MySQL Server at System Startup" 은 켠 그대로 (Windows 서비스 `MySQL80`).
+2. **코드 받기**: 백엔드와 프론트를 **같은 폴더 안에 나란히** 받는다 (서버가 옆 폴더의 화면을 같이 띄운다).
+   ```powershell
+   mkdir C:\yuche; cd C:\yuche
+   git clone --recurse-submodules https://github.com/beak00hyunmin7/team_yucheital_backend.git
+   git clone https://github.com/beak00hyunmin7/team_yucheital_frontend.git
+   ```
+3. **파이썬 환경**
+   ```powershell
+   cd C:\yuche\team_yucheital_backend\prediction_server
+   python -m venv .venv
+   .venv\Scripts\pip install torch      # GPU 가 있으면 pytorch.org 에서 CUDA 버전 명령어로
+   .venv\Scripts\pip install -r ai\terrainFlowSim\ai_model\requirements.txt
+   .venv\Scripts\pip install -r backend\requirements.txt
+   ```
+4. **모델 파일** (125 MB, 저장소에 없음. AI 저장소 릴리스에서 받는다)
+   ```powershell
+   mkdir checkpoints -Force
+   curl.exe -L -o checkpoints\best.pt "https://github.com/beak00hyunmin7/team_yucheital_ai_model/releases/download/weights-p2-wet8/best_p2_wet8.pt"
+   ```
+   받은 뒤 `checkpoints\best.pt` 가 약 125 MB 인지 확인 (몇 KB 면 다운로드 실패).
+5. **DB 비밀번호 설정**: `.env.example` 을 `.env` 로 복사하고 `YUCHE_DB_PASSWORD` 에 1번의 root 비밀번호를 적는다.
+   ```powershell
+   copy .env.example .env
+   notepad .env
+   ```
+   `.env` 는 git 에 올라가지 않는다. **비밀번호를 코드·README·채팅에 적지 말 것.**
+
+## 실행
+
+```powershell
+cd C:\yuche\team_yucheital_backend\prediction_server
+.\run_server.bat
+```
+
+- `[1/3] DB ready: yuche_ai_db` 가 뜨면 DB 연결 성공. 데이터베이스와 테이블은 자동으로 만든다.
+- 브라우저에서 <http://127.0.0.1:8000> → 회원가입 → 로그인 → 예측. 끄기: 터미널에서 Ctrl+C.
+- 비밀번호가 틀리면 `[ERROR] MySQL 비밀번호가 틀렸습니다` 가 뜬다 → `.env` 확인.
+- 개발·검증용 화면 <http://127.0.0.1:8000/test> · API 문서 <http://127.0.0.1:8000/docs>
+- **노트북은 충전기를 꽂고 Windows 전원 모드를 '최고 성능'으로.** 배터리 모드에서는 CPU 가 느려져
+  예측이 2배 가까이 느려진다(실측).
+- DB 내용 보기: `.\show_users.bat`(계정·기록 수), `.\show_db.bat`(전체 표 + `data\db_export\*.csv`)
+- WSL 안의 MariaDB 를 쓰는 예전 방식은 `run_windows.bat` (아래 "WSL MariaDB" 절). 이때도 비밀번호는 `.env` 에서 읽는다.
+
 
 ## 담당 경계
 
@@ -37,7 +79,8 @@ prediction_server/
 │   ├── history.py          분석 기록 저장 (MySQL + 썸네일 파일)
 │   ├── contour_color.py    이미지 색 체계 → 학습 형식 변환
 │   ├── analysis_figure.py  분석 지도 렌더링
-│   ├── terrain_io.py       '등고선 데이터'(고도 격자) 파일 파서 (.npy/.csv/.asc/.tif ...)
+│   ├── terrain_io.py       '등고선 데이터'(고도 격자) 파일 파서 (.npy/.csv/.asc/.tif ...) + 빈칸·주의 문구
+│   ├── db_config.py        DB 접속 정보 (.env 에서 읽음) + run_server.bat 의 DB 만들기
 │   ├── lan_ip.py · show_db.py · show_users.py   랜 주소 출력 · DB 내용 보기/CSV 저장
 │   └── requirements.txt    서버 의존성
 ├── ai/                     (서브모듈) team_yucheital_ai_model — 추론 코드. 체크포인트는 없음
@@ -45,27 +88,19 @@ prediction_server/
 ├── frontend/index.html     개발·검증용 화면(정답 비교 탭 포함). 정식 화면은 frontend 저장소
 ├── tests/                  torch·DB 없이 도는 단위 테스트
 ├── run_windows.bat         더블클릭 실행 (WSL MariaDB 시작 포함)
-├── run_server.bat          더블클릭 실행 (이 PC 의 MySQL80 · DB yuche_ai_db, 팀 화면 같이 서빙)
+├── run_server.bat          실행 (이 PC 의 MySQL80 · DB yuche_ai_db, 팀 화면 같이 서빙)  ← 기본
+├── .env.example            DB 비밀번호 설정 견본 → .env 로 복사 (git 제외)
+├── make_all_test_inputs.py · run_input_tests.py   입력 파일 47종 생성 · 자동 검증
+├── make_test_input.py      가상 지형 1개(.npy/.csv/.png) 생성
 └── show_db.bat · show_users.bat   가입 계정·분석 기록 확인 (data/db_export/*.csv 로도 저장)
 ```
 
-## 처음 설치
+## 설정 (환경변수)
 
-```powershell
-git clone --recurse-submodules https://github.com/beak00hyunmin7/team_yucheital_backend.git
-# 이미 clone 했다면: git submodule update --init prediction_server/ai
-cd team_yucheital_backend\prediction_server
-python -m venv .venv
-# torch 는 CUDA 버전에 맞는 빌드를 직접 설치: https://pytorch.org/get-started/locally/
-.venv\Scripts\pip install -r ai\terrainFlowSim\ai_model\requirements.txt
-.venv\Scripts\pip install -r backend\requirements.txt
-```
-
-- **체크포인트**: `best.pt` 는 저장소에 없다. AI 담당자에게 받아 `prediction_server/checkpoints/best.pt` 에 둔다
-  (다른 곳이면 환경변수 `AI_MODEL_CHECKPOINT`). 권장 모델은 `checkpoints_p2_wet8/best.pt`(125MB).
-- **파이썬 위치**: `run_windows.bat` 은 환경변수 `YUCHE_PYTHON` → `prediction_server\.venv` →
-  `ai\terrainFlowSim\ai_model\.venv` 순서로 찾는다. 이미 AI 쪽 venv 가 있으면 그걸 그대로 써도 된다.
-- **DB**: WSL Ubuntu 에 MariaDB (아래 "회원가입 / 로그인" 참고). DB 가 없어도 로그인 없이 예측은 된다.
+- **파이썬 위치**: 실행 스크립트는 `YUCHE_PYTHON` → `prediction_server\.venv` → `ai\terrainFlowSim\ai_model\.venv` 순서로 찾는다.
+- **DB 접속 정보**는 `backend/db_config.py` 가 환경변수 → `prediction_server/.env` → 기본값 순서로 읽는다
+  (`YUCHE_DB_HOST` `YUCHE_DB_PORT` `YUCHE_DB_USER` `YUCHE_DB_PASSWORD` `YUCHE_DB_NAME`, 또는 전체 주소 `YUCHE_DB_URL`).
+- DB 가 없어도 로그인 없이 예측은 된다.
 
 | 환경변수 | 기본값 | 의미 |
 |---|---|---|
@@ -75,37 +110,36 @@ python -m venv .venv
 | `YUCHE_SITE_DIR` | (없음) | 팀 화면 폴더(`…/yuche_frontend`). 지정하면 `/`·`/vtkjs.html`·`/style.css` 로 화면까지 내줘서 주소 하나(`:8000`)로 화면 + API. 이때 개발·검증용 화면은 `/test` |
 | `YUCHE_DB_URL` · `YUCHE_SECRET` · `YUCHE_HISTORY_DIR` · `YUCHE_WSL_DISTRO` | 아래 각 절 | |
 
-## 실행
-
-```bat
-prediction_server\run_windows.bat
-```
-
-DB 를 WSL MariaDB 대신 이 PC 의 MySQL80 으로 쓰고 화면까지 같이 열려면 `run_server.bat`
-(DB 이름 `yuche_ai_db`, 화면 폴더는 이 저장소 옆에 clone 한 프론트 저장소를 찾고, 다르면 `YUCHE_SITE_DIR` 로 지정).
-
-또는 수동:
-
-```powershell
-wsl -d Ubuntu-22.04 -u root -- service mariadb start
-cd prediction_server
-.venv\Scripts\python.exe -m uvicorn app:app --app-dir backend --host 127.0.0.1 --port 8000
-```
-
-API 문서 <http://127.0.0.1:8000/docs> · 개발·검증용 화면 <http://127.0.0.1:8000>
-
 ## 테스트
 
-torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구):
+단위 테스트 — torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구):
 
 ```powershell
 cd prediction_server
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+### 입력 파일 자동 검증 (서버를 켠 상태에서)
+
+확장자 12종 + 축척·비트수·빈칸·에러 입력까지 테스트 파일 47개를 만들고, 켜져 있는 서버에 화면과 똑같이
+보내서 결과를 표(`결과.csv`)와 그림 모음 페이지(`결과.html`)로 정리한다. 코드를 고친 뒤 회귀 확인용.
+
+```powershell
+.venv\Scripts\python.exe make_all_test_inputs.py --out C:\yuche\test_input
+.venv\Scripts\python.exe run_input_tests.py --dir C:\yuche\test_input   # 로그인 계정을 물어본다
+# -> C:\yuche\test_input\_결과\결과.html
+```
+
+2026-11-23 결과: 48건 중 정상 46 / 확인 2 / 문제 0 (확인 2건: 고저차가 큰 지형·직사각형 그림 — 아래 "한계").
+
+### 속도 로그
+
+서버 터미널에 요청마다 단계별 시간이 찍힌다 (`[timing] predict terrain t=18s | 파일읽기 … | AI추론 … | 합계 …`).
+끄려면 `YUCHE_TIMING=0`.
+
 ## 같은 공유기의 다른 PC·폰에서 접속
 
-`run_windows.bat` 은 `0.0.0.0` 에 바인딩하므로 서버 쪽은 준비돼 있다. 기동하면 접속 주소를
+`run_server.bat` · `run_windows.bat` 은 `0.0.0.0` 에 바인딩하므로 서버 쪽은 준비돼 있다. 기동하면 접속 주소를
 직접 찍어준다. 프런트는 `const API = location.origin` 이라 다른 호스트로 들어와도 그대로 돈다.
 
 남은 건 **방화벽 1회 허용**이다. 관리자 PowerShell 에서 한 번만:
@@ -134,14 +168,16 @@ New-NetFirewallRule -DisplayName "yuche server 8000" -Direction Inbound `
 
 ## 회원가입 / 로그인 (MySQL)
 
-- DB 는 **WSL Ubuntu 안의 MariaDB**(MySQL 호환). Windows 쪽 Python 이 `localhost:3306` 으로 접속.
-- 접속정보: `mysql+pymysql://root:1234@127.0.0.1:3306/yuche_db` — 환경변수 `YUCHE_DB_URL` 로 교체 가능.
+- DB 는 이 PC 의 **MySQL80**(`run_server.bat`) 또는 WSL 안의 MariaDB(`run_windows.bat`). 데이터베이스 이름 기본 `yuche_ai_db`.
+- 접속정보: `prediction_server/.env` (위 "빠른 시작" 5번). 코드에는 비밀번호를 적지 않는다.
 - 로그인 토큰 서명키: 환경변수 `YUCHE_SECRET` (배포 시 반드시 교체).
 - API: `POST /api/auth/signup`, `POST /api/auth/login` → `{ok, email, token}` / `GET /api/auth/me`.
   `POST /api/predict` 는 `Authorization: Bearer <token>` 필요 (DB 미연결 시 자동으로 인증 생략).
 - 프런트: 첫 화면이 로그인, 성공하면 토큰을 localStorage 에 저장하고 예측 화면 표시.
 
-### MariaDB 최초 설치 (WSL, 1회)
+### WSL MariaDB (예전 방식, `run_windows.bat`)
+
+아래 명령의 `<비밀번호>` 를 정하고, 같은 값을 `.env` 의 `YUCHE_DB_PASSWORD` 에 적는다.
 
 ```bash
 wsl -d Ubuntu-22.04 -u root -- bash -lc '
@@ -150,9 +186,9 @@ wsl -d Ubuntu-22.04 -u root -- bash -lc '
   sed -i "s/^bind-address.*/bind-address = 0.0.0.0/" /etc/mysql/mariadb.conf.d/50-server.cnf
   service mariadb start
   mysql -uroot -e "
-    CREATE USER IF NOT EXISTS \"root\"@\"%\" IDENTIFIED BY \"1234\";
+    CREATE USER IF NOT EXISTS \"root\"@\"%\" IDENTIFIED BY \"<비밀번호>\";
     GRANT ALL ON *.* TO \"root\"@\"%\" WITH GRANT OPTION;
-    CREATE DATABASE IF NOT EXISTS yuche_db CHARACTER SET utf8mb4;
+    CREATE DATABASE IF NOT EXISTS yuche_ai_db CHARACTER SET utf8mb4;
     FLUSH PRIVILEGES;"
 '
 ```
@@ -248,7 +284,21 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
 
 '등고선 데이터' 지원 포맷 (`terrain_io.py` `_PARSERS`):
 `.npy` · `.csv` `.txt` `.dat` (숫자 격자) · `.asc` `.grd` (ESRI ASCII Grid, cellsize 자동 인식) ·
-`.tif` `.tiff` (단일 밴드) · `.png` `.jpg` (회색조 높이맵).
+`.tif` `.tiff` (단일 밴드, GeoTIFF 셀 크기·빈칸 태그 인식) · `.png` `.jpg` `.jpeg` `.webp` (회색조 높이맵).
+
+입력 확인 (2026-11-23, `terrain_io.py` · `app.py _domain_warnings`). 거부는 422 + 안내 문구, 주의는 응답 `warnings`:
+
+| 경우 | 처리 |
+|---|---|
+| 빈칸(NaN, -9999 같은 -1000 m 미만 값, GeoTIFF 빈칸 태그) | 가장 가까운 칸의 고도로 채움 + 주의 (예전: 최저 고도로 채워 인공 구덩이가 생김) |
+| 손상된 파일·확장자와 내용 불일치 | 422 안내 (예전: 그림 파일은 500 서버 에러) |
+| 컬러 그림(등고선 png·컬러 tif)을 데이터 모드로 | 422 "등고선 이미지 모드로" (예전: 밝기를 고도로 읽어 엉뚱한 결과) |
+| 지도 한 변이 0.5~2 km 밖 | 주의 (모델은 축척을 모르고 1 km 로 본다) |
+| 위경도 GeoTIFF | 셀 크기를 미터로 환산해서 크기 확인에 사용 |
+| 32칸 미만 · 정사각형 아님(1.2배 초과) | 주의 |
+| csv 에서 숫자 아닌 줄·칸 수 다른 줄을 버림 | 주의 (헤더 1줄은 조용히 넘김) |
+| 8비트 tif·높이맵 그림 | 주의 (256단계, 실제 고도 아님) |
+| 강우 20~80 mm 밖 | 범위 끝값으로 계산 + 주의 (예전: 모델 안에서 조용히 잘리고 응답엔 원래 값) |
 → 팀에서 쓰는 실제 포맷이 정해지면 `_PARSERS` 에 함수 하나만 추가.
 
 ## 강우 · 시점 조건
@@ -281,7 +331,8 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
 
 ## 응답 (`POST /api/predict`, multipart)
 
-폼 필드: `mode`(image|terrain), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`
+폼 필드: `mode`(image|terrain), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
+`light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false
 
 ```json
 {
@@ -297,7 +348,8 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
                                  // 웹 화면 3D 보기용. 96×96 높이(0..1 × 65535)·수심(depth_unit_m 단위) uint16 리틀엔디언 base64, 0행 = 위쪽. 만들지 못하면 null
   "drain_candidate": { "pixel": {…}, "normalized": {…}, "image": { "x": 0.61, "y": 0.35 } },
   "checkpoint": "best.pt",
-  "meta": { "mode": "...", "grid_shape": [...], "rain_mm": 45.0, ... }
+  "meta": { "mode": "...", "grid_shape": [...], "rain_mm": 45.0, ... },
+  "warnings": ["지도 한 변이 약 5.8 km입니다 …"]   // 사용자에게 보여줄 주의 문구 (없으면 빈 목록). 화면은 파일 칩·알림·결과 안내에 표시
 }
 ```
 
@@ -306,8 +358,29 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
 - 색에서 높이를 읽을 수 없는 이미지(지형도·스캔 도면)는 `422 { "detail": "…", "code": "unreadable_image" }`.
   프런트는 `code` 로 일반 422(파일 형식 오류 등)와 구분해 다음 행동 안내 화면을 띄운다.
 
+## 속도 (2026-11-23 개선)
+
+화면은 예측 버튼 한 번에 요청을 6~8개 보낸다(사용자 시점 + 배수구 기준 18초 + 시간 변화 장면들).
+노트북 CPU·충전 상태에서 측정 (전 → 후):
+
+| | 개선 전 | 개선 후 |
+|---|---|---|
+| 이미지 모드 첫 화면 / 전체 | 5.5초 / 16~20초 | 1.2초 / 3초 |
+| 고도 격자 첫 화면 / 전체 | 3.4초 / 12초 | 2.1초 / 4초 |
+| 기록 저장 | 2.4초 (예측을 기다림) | 0.05초 |
+
+원인은 AI 추론(요청당 0.03초)이 아니었다.
+- 같은 그림의 색 체계 판별·변환을 요청마다 반복 (요청당 2초) → 결과 캐시 + 같은 색끼리 묶어 계산(4~5배, 결과 동일)
+- 화면이 안 쓰는 분석 지도·지도 그림을 요청마다 그림 (요청당 1.4초) → `light` / `no_analysis` / `no_map`
+- 예측이 `async` 함수 안에서 동기 계산을 해서, 예측 중에는 서버 전체(로그인·기록)가 멈춤 → 일반 함수로
+  바꾸고 예측끼리만 `_PREDICT_LOCK` 으로 순서대로 (동시에 돌리면 GIL 때문에 오히려 느려짐)
+
 ## 한계
 
 - 예측은 지형수문 근사 시뮬레이터로 만든 학습쌍을 흉내낸 것. CFD/실측이 아님.
 - 입력 등고선이 학습 데이터 스타일에서 멀수록(손그림·일반 지도 등) 정확도 급락.
-- 해상도 256×256 고정. 큰 격자는 서버가 자동 축소 후 처리.
+- 모델 입력은 128×128 (wet8). 큰 격자는 서버가 자동 축소 후 처리(한 변 512칸 이하).
+- 모델은 **축척과 고저차를 모른다.** 서버가 고도를 0~1 로 맞춰 등고선 그림을 그리므로, 같은 모양이면
+  100 m 지도든 10 km 지도든, 고저차 20 m 든 500 m 든 같은 그림으로 들어간다. 크기는 주의 문구로 알리지만
+  고저차는 학습 데이터 범위를 정하지 않아 아직 알리지 않는다.
+- 그림은 모델 안에서 정사각형으로 늘려서 넣는다. 직사각형 그림은 찌그러진다(주의 문구).

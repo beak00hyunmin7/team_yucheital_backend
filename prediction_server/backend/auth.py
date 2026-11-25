@@ -4,7 +4,7 @@
 기존 sejong_yucheital_project/.../yuche_backend 의 로직을 웹앱 한 서버 안으로 옮긴 것.
 DB 는 MySQL 그대로 사용. 접속 정보는 환경변수로 덮어쓸 수 있다.
 
-  YUCHE_DB_URL   기본 mysql+pymysql://root:1234@127.0.0.1:3306/yuche_db
+  DB 접속 정보   backend/db_config.py 가 환경변수 / prediction_server/.env 에서 읽는다 (비밀번호를 코드에 적지 않음)
   YUCHE_SECRET   로그인 토큰 서명 키. 안 주면 webapp/.yuche_secret 에 임의값을 만들어 쓴다
 
 로그인하면 HMAC 서명 토큰을 돌려주고, 프런트가 그걸 저장했다가
@@ -32,8 +32,10 @@ from sqlalchemy import Column, DateTime, Integer, String, create_engine, func
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+import db_config  # noqa: E402  (같은 backend 폴더)
+
 DB_URL = os.environ.get(
-    "YUCHE_DB_URL", "mysql+pymysql://root:1234@127.0.0.1:3306/yuche_db?charset=utf8mb4"
+    "YUCHE_DB_URL", db_config.db_url()
 )
 def _load_secret() -> bytes:
     """토큰 서명 키. 환경변수 > 로컬 파일 > (쓰기 실패 시) 메모리 전용 임의값.
