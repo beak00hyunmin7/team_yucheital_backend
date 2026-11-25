@@ -2,6 +2,9 @@
 
 photo1 산 셋(2층·2층·3층) / photo2 봉우리 둘인 큰 산 하나, 비스듬히 찍음(4층)
 photo3 산 둘 + 튄 잉크 점, 비스듬히 찍음(3층) / photo4 산 하나(4층, 왼쪽 위 빈 네모 구멍이 작음)
+demo1~6 시연용 학습지 (11/25). 종이를 90도·180도 돌려 들고 찍었다 (빈 네모가 사진의 오른쪽 위·왼쪽 아래).
+  예전 코드로는 2장은 네모 4개를 못 찾고(오른쪽 아래 네모가 회색으로 옅음) 2장은 빈 네모를 못 알아봐서
+  같은 종이도 찍을 때마다 결과 방향이 달라졌다.
 """
 import io
 import unittest
@@ -71,6 +74,65 @@ class HandDrawnPhotoTest(unittest.TestCase):
     def test_not_an_image_is_rejected(self):
         with self.assertRaises(hd.HandDrawnError):
             hd.read_drawing(b"not an image")
+
+
+class HandDrawnDemoSheetTest(unittest.TestCase):
+    """시연용 학습지 사진: 네모 4개와 빈 네모(방향)를 늘 찾고, 층수가 맞는지."""
+    LEVELS = {"demo1.jpg": 4, "demo2.jpg": 4, "demo3.jpg": 4, "demo4.jpg": 3, "demo5.jpg": 4, "demo6.jpg": 3}
+
+    def test_markers_hollow_and_levels(self):
+        for name, levels in self.LEVELS.items():
+            with self.subTest(name):
+                terrain, preview, info, warns = _read(name)
+                self.assertTrue(info["markers_found"], warns)
+                self.assertTrue(info["hollow_found"], warns)
+                self.assertEqual(info["levels"], levels)
+
+    def test_markers_found_at_camera_sizes(self):
+        # 웹 화면 카메라 판별은 640~960px 로 줄여서 같은 규칙을 쓴다 -> 줄여도 같은 모서리를 찾아야 한다
+        for name in list(self.LEVELS) + ["photo1.jpg", "photo2.jpg", "photo3.jpg"]:
+            img = hd._open((SAMPLES / name).read_bytes())
+            q0, h0 = hd.find_markers(np.asarray(img).astype(np.int16))
+            for W in (960, 640):
+                s = W / max(img.size)
+                small = img.resize((round(img.size[0] * s), round(img.size[1] * s)), Image.BILINEAR)
+                with self.subTest(name=name, W=W):
+                    found = hd.find_markers(np.asarray(small).astype(np.int16))
+                    self.assertIsNotNone(found)
+                    q, hollow = found
+                    self.assertTrue(hollow)
+                    self.assertLess(np.abs(q / np.array(small.size) - q0 / np.array(img.size)).max(), 0.03)
+
+    def test_turned_sheet_gives_same_terrain(self):
+        raw = (SAMPLES / "demo4.jpg").read_bytes()
+        base = hd.read_drawing(raw, tilt_m=0)[0]
+        for ang in (90, 180, 270):
+            buf = io.BytesIO()
+            Image.open(io.BytesIO(raw)).rotate(ang, expand=True).save(buf, "JPEG", quality=92)
+            t = hd.read_drawing(buf.getvalue(), tilt_m=0)[0]
+            self.assertGreater(np.corrcoef(base.ravel(), t.ravel())[0, 1], 0.98, ang)
+
+    def test_warm_light_keeps_levels(self):
+        # 노란 조명(파랑이 약해짐)을 흉내: 종이 흰색에 맞춘 색 보정으로 층수가 그대로여야 한다
+        for name, levels in (("photo1.jpg", 3), ("demo2.jpg", 4)):
+            img = Image.open(SAMPLES / name).convert("RGB")
+            r, g, b = img.split()
+            warm = Image.merge("RGB", (r.point(lambda v: min(255, v * 1.08)), g, b.point(lambda v: v * 0.8)))
+            buf = io.BytesIO()
+            warm.save(buf, "JPEG", quality=90)
+            with self.subTest(name):
+                self.assertEqual(hd.read_drawing(buf.getvalue())[2]["levels"], levels)
+
+    def test_small_sheet_in_landscape_frame(self):
+        # 노트북 카메라처럼 가로 1280x720 화면 가운데에 종이가 작게(높이 70%) 잡혀도 네모와 방향을 찾는다
+        img = hd._open((SAMPLES / "demo1.jpg").read_bytes())
+        s = 720 * 0.7 / img.size[1]
+        im = img.resize((round(img.size[0] * s), round(img.size[1] * s)), Image.BILINEAR)
+        frame = Image.new("RGB", (1280, 720), (40, 38, 36))
+        frame.paste(im, ((1280 - im.size[0]) // 2, (720 - im.size[1]) // 2))
+        found = hd.find_markers(np.asarray(frame).astype(np.int16))
+        self.assertIsNotNone(found)
+        self.assertTrue(found[1])
 
 
 if __name__ == "__main__":

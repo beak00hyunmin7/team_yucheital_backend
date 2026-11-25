@@ -7,7 +7,7 @@
 순서
   1) 모서리 검은 네모 4개 찾기 (왼쪽 위만 속이 빈 네모 -> 사진이 돌아가 있어도 방향을 안다)
   2) 네 네모를 정사각형 꼭짓점으로 펴기 (비스듬히 찍어도 됨)
-  3) 파랑·빨강 선 찾기 (튄 잉크 점은 버림)
+  3) 종이 흰색에 맞춰 색 보정 뒤 파랑·빨강 선 찾기 (튄 잉크 점은 버림)
   4) 바깥(종이 테두리와 이어진 빈 곳) = 0층, 선을 하나 넘을 때마다 +1층
   5) 층 사이를 매끈하게 이어 고도로
 
@@ -53,12 +53,34 @@ def _open(raw: bytes) -> Image.Image:
 
 # --------------------------------------------------------------------------- #
 # 1) 모서리 네모
+#   [11/25 개선] 시연 사진 6장 중 2장은 네모를 못 찾고 2장은 빈 네모를 못 알아봐서(같은 종이도 찍을 때마다
+#   결과 방향이 바뀜) 아래처럼 바꿨다. 웹 화면의 카메라 판별(vtkjs.html findSheetMarkers)도 같은 규칙이다.
+#   - 어둡기: 고정 밝기(95) 대신 '그 자리 종이 밝기의 60% 보다 어두운가'. 조명에 회색으로 옅게 찍힌 네모도 잡는다
+#   - 네모 후보: 꽉 찬 모양(60% 이상) · 가로세로 0.5~2배 · 종이보다 충분히 어두움(55% 이하) -> 그림자·종이 접힌 자국 제외
+#   - 빈 네모: '속 구멍이 네모 넓이의 4% 이상이고 가운데에 있음'. 여러 개면 구멍이 분명히 가장 큰 것
+#   - 네 모서리 고르기: 넓이만 보지 않고 마주 보는 변 길이·모서리 각(45~135도)이 종이 네 모서리다운 것을 고른다
 # --------------------------------------------------------------------------- #
+MARKER_DARK = 0.6        # 종이 밝기의 이 비율보다 어두우면 잉크
+MARKER_CONTRAST = 0.55   # 네모 평균 밝기 / 주변 종이 밝기 가 이보다 크면(옅으면) 네모가 아님
+MARKER_MIN_QUAD = 0.03   # 네 네모가 감싸는 넓이가 사진의 이 비율보다 작으면 버림 (노트북 카메라처럼 종이가 작게 찍혀도 찾게)
+
+
+def _paper_brightness(rgb: np.ndarray):
+    """(밝기, 그 자리 종이 밝기). 종이 밝기 = 둘레의 가장 밝은 값을 부드럽게 (조명이 고르지 않아도 그 자리 기준)."""
+    h, w, _ = rgb.shape
+    lum = rgb.max(-1).astype(np.float32)
+    s = 4
+    k = max(3, int(max(h, w) / s / 16))
+    bg = ndi.uniform_filter(ndi.maximum_filter(lum[::s, ::s], size=k), size=k)
+    return lum, np.asarray(Image.fromarray(bg).resize((w, h), Image.BILINEAR))
+
+
 def find_markers(rgb: np.ndarray):
     """네 모서리 네모 중심 (왼위, 오위, 오아래, 왼아래) 와 빈 네모를 찾았는지. 못 찾으면 None."""
     h, w, _ = rgb.shape
+    lum, bg = _paper_brightness(rgb)
     mx, mn = rgb.max(-1), rgb.min(-1)
-    dark = (mx < 95) & (mx - mn < 60)
+    dark = (lum < np.maximum(95.0, MARKER_DARK * bg)) & (mx - mn < 60)
     lab, _ = ndi.label(dark)
     cands = []
     for i, sl in enumerate(ndi.find_objects(lab), 1):
@@ -68,18 +90,29 @@ def find_markers(rgb: np.ndarray):
             continue                            # 사진 끝에 걸친 어두운 것(책상·그림자·물건)은 네모가 아님
         m = lab[sl] == i
         area = int(m.sum())
-        if not (h * w * 2e-4 < area < h * w * 1.5e-2):
+        if not (h * w * 6e-5 < area < h * w * 1.5e-2):
             continue
         bh, bw = m.shape
-        if not (0.4 < bh / bw < 2.5):
+        if not (0.5 < bh / bw < 2.0):
             continue
         filled_m = ndi.binary_fill_holes(m)
         filled = int(filled_m.sum())
-        if filled / (bh * bw) < 0.45:           # 네모·동그라미처럼 꽉 찬 모양만
+        if filled / (bh * bw) < 0.6:            # 네모·동그라미처럼 꽉 찬 모양만
             continue
+        if float(lum[sl][m].mean()) / max(float(bg[sl][m].mean()), 1.0) > MARKER_CONTRAST:
+            continue                            # 그림자처럼 옅은 것 (매직 네모는 종이의 절반보다 어둡다)
         cy, cx = ndi.center_of_mass(filled_m)
-        cands.append(dict(x=sl[1].start + cx, y=sl[0].start + cy, area=filled,
-                          hollow=filled / area > 1.15))
+        frac, off = 0.0, 9.0                    # 속 구멍: 넓이 비율, 가운데에서 벗어난 정도
+        holes = filled_m & ~m
+        if holes.any():
+            hl, hn = ndi.label(holes)
+            hs = ndi.sum(holes, hl, range(1, hn + 1))
+            j = int(np.argmax(hs)) + 1
+            hy, hx = ndi.center_of_mass(hl == j)
+            frac = float(hs[j - 1]) / filled
+            off = float(np.hypot(hy - cy, hx - cx)) / np.sqrt(filled)
+        cands.append(dict(x=sl[1].start + cx, y=sl[0].start + cy, area=filled, frac=frac,
+                          hollow=frac >= 0.04 and off <= 0.25))
     if len(cands) < 4:
         return None
     cands.sort(key=lambda c: -c["area"])
@@ -96,14 +129,29 @@ def find_markers(rgb: np.ndarray):
         if sizes.max() / sizes.min() > 4:       # 크기가 너무 제각각이면 다른 물체가 섞인 것
             continue
         area = 0.5 * abs(sum(_cr(p[i], p[(i + 1) % 4]) for i in range(4)))
-        if area < h * w * 0.08:                 # 사진의 아주 작은 부분이면 네모 4개가 아님
+        if area < h * w * MARKER_MIN_QUAD:      # 사진의 아주 작은 부분이면 네모 4개가 아님
             continue
-        if best is None or area > best[0]:
-            best = (area, [q[j] for j in order])
+        # 종이 네 모서리라면 (비스듬히 찍어도) 마주 보는 변 길이가 비슷하고 모서리 각이 45~135도 안이다
+        sides = [float(np.linalg.norm(p[(i + 1) % 4] - p[i])) for i in range(4)]
+        r1 = max(sides[0], sides[2]) / max(min(sides[0], sides[2]), 1.0)
+        r2 = max(sides[1], sides[3]) / max(min(sides[1], sides[3]), 1.0)
+        cosmax = max(abs(float((p[i - 1] - p[i]) @ (p[(i + 1) % 4] - p[i])))
+                     / (np.linalg.norm(p[i - 1] - p[i]) * np.linalg.norm(p[(i + 1) % 4] - p[i]) + 1e-9) for i in range(4))
+        if r1 > 2.2 or r2 > 2.2 or cosmax > 0.7:
+            continue
+        regular = (sizes.min() / sizes.max()) ** 0.5 / (1 + 0.5 * (r1 - 1) + 0.5 * (r2 - 1) + cosmax)
+        nh = sum(q[j]["hollow"] for j in order)
+        score = area * regular * (1.15 if nh == 1 else 1.0)    # 빈 네모가 딱 하나인 조합을 조금 더 믿는다
+        if best is None or score > best[0]:
+            best = (score, [q[j] for j in order])
     if best is None:
         return None
     quad = best[1]
     hol = [i for i, c in enumerate(quad) if c["hollow"]]
+    if len(hol) > 1:                            # 여럿이 빈 네모처럼 보이면 구멍이 분명히 가장 큰 것만
+        fr = sorted(((quad[i]["frac"], i) for i in hol), reverse=True)
+        if fr[0][0] >= 1.6 * fr[1][0]:
+            hol = [fr[0][1]]
     k = hol[0] if len(hol) == 1 else int(np.argmin([c["x"] + c["y"] for c in quad]))
     quad = quad[k:] + quad[:k]                  # 빈 네모가 왼쪽 위
     return np.array([[c["x"], c["y"]] for c in quad]), len(hol) == 1
@@ -129,6 +177,16 @@ def _warp(img: Image.Image, quad: np.ndarray, size: int = WORK) -> Image.Image:
 # --------------------------------------------------------------------------- #
 # 3) 선 찾기  4) 층 세기  5) 매끈하게
 # --------------------------------------------------------------------------- #
+def _white_balance(rgb: np.ndarray) -> np.ndarray:
+    """종이(밝은 쪽) 색이 흰색이 되도록 채널마다 늘린다. 노트북 카메라·노란 조명에서 파랑이 회색으로 찍혀도 선을 찾게.
+    (11/25: 노란 조명을 흉내 낸 사진에서 동그라미 층수가 4 -> 1 로 줄던 문제)"""
+    f = rgb.astype(np.float32)
+    lum = f.max(-1)
+    paper = lum >= np.percentile(lum, 60)
+    white = np.array([np.percentile(f[..., c][paper], 90) for c in range(3)])
+    return np.clip(f * (245.0 / np.maximum(white, 60.0)), 0, 255).astype(np.int16)
+
+
 def _strokes(rgb: np.ndarray, clear_corners: bool):
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     blue = (b > r + 35) & (b > g + 15)
@@ -253,7 +311,7 @@ def read_drawing(raw: bytes, n: int = 96, tilt_m: float = TILT_M):
         flat = img.resize((WORK, WORK), Image.BICUBIC)
         warns.append("모서리 네모 4개를 찾지 못해 사진 전체를 그대로 읽었습니다. "
                      "네 모서리 네모가 다 보이게 위에서 찍으면 더 정확합니다.")
-    st, blue, red = _strokes(np.asarray(flat).astype(np.int16), clear_corners=found is not None)
+    st, blue, red = _strokes(_white_balance(np.asarray(flat)), clear_corners=found is not None)
     if st.sum() < WORK * WORK * 0.003:
         raise HandDrawnError("파랑·빨강 선을 거의 찾지 못했습니다. 굵은 매직으로 진하게 그린 뒤 다시 찍어 주세요.")
     L, top, lab, regions, reach = _levels(st)

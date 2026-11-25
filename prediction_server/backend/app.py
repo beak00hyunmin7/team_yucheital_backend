@@ -506,9 +506,14 @@ def predict(
     light: bool = Form(False),
     no_analysis: bool = Form(False),
     no_map: bool = Form(False),
+    mark_x: float | None = Form(None),
+    mark_y: float | None = Form(None),
     file: UploadFile = File(...),
     _user: str | None = Depends(_auth_gate),
 ) -> dict:
+    # mark_x / mark_y (선택, 그림 좌표 0~1 · 왼쪽 위 기준): 분석 지도의 ★를 이 자리에 그린다 (고도격자·손그림 모드).
+    # 웹 화면은 120초까지 물이 남는 곳(침수 위험지역)으로 배수구를 다시 고르므로, 그 자리를 넘겨서 ★를 맞춘다.
+    # 보내지 않으면 지금처럼 예측 유출이 가장 큰 칸에 그린다. drain_candidate 응답은 어느 쪽이든 그대로다.
     # no_analysis / no_map (데이터 모드만 의미 있음): 첫 화면은 '사용자 시점' 요청과 '배수구 기준 시점(18초)'
     # 요청을 같이 보내는데, 화면은 앞 요청의 지도(map)와 뒤 요청의 분석 지도(analysis)만 쓴다.
     # 쓰지 않는 그림을 빼달라는 표시. 기본값 False 라 보내지 않으면 지금처럼 둘 다 그린다.
@@ -516,15 +521,18 @@ def predict(
         raise HTTPException(503, "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.",
                             headers={"Retry-After": "10"})
     try:
+        mark = None
+        if mark_x is not None and mark_y is not None:
+            mark = (float(np.clip(mark_x, 0.0, 1.0)), float(np.clip(mark_y, 0.0, 1.0)))
         return _predict(mode, rain_mm, time_s, dx, color_scheme, reverse,
-                        light or no_analysis, light or no_map, light, file)
+                        light or no_analysis, light or no_map, light, file, mark)
     finally:
         _PREDICT_LOCK.release()
 
 
 def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
              reverse: bool, skip_analysis: bool, skip_map: bool, light: bool,
-             file: UploadFile) -> dict:
+             file: UploadFile, mark: tuple[float, float] | None = None) -> dict:
     # light=True: 시간 변화(타임랩스)용 요청. 화면이 오버레이·3D 격자만 쓰므로
     # 데이터 모드의 분석 지도·지도 그림(요청당 약 1.4초)을 건너뛴다. 기본값 False 라 기존 화면은 그대로.
     if mode not in {"image", "terrain", "hand"}:
@@ -657,11 +665,18 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
                 # 상태다. terrain(등고선 선)과 겹쳐 그리려면 예측을 다시 뒤집어 맞춘다.
                 inten = np.flipud(intensity_from_prediction(pred_img, terrain.shape))
                 r, c = np.unravel_index(int(np.argmax(inten)), inten.shape)
+                mr, mc = int(r), int(c)
+                if mark is not None:
+                    # 그림 좌표(위 = 0) -> terrain 배열 칸(0행 = 아래쪽). drain_candidate 의 image 와 반대 계산
+                    th, tw = terrain.shape
+                    mc = int(round(mark[0] * (tw - 1)))
+                    mr = int(round((1.0 - mark[1]) * (th - 1)))
+                    meta["analysis_mark"] = "client"
                 # 제목은 "AI 예측 배수맵" 한 줄만 둔다 (조건 부제목은 길어서 그림 밖으로 잘렸다.
                 # 강우·시간 조건은 웹 화면 결과 설명에 이미 나온다)
                 png = None if skip_analysis else render_analysis_figure(
                     terrain, inten, effective_dx,
-                    mark_idx=(int(r), int(c)),
+                    mark_idx=(mr, mc),
                 )
             if not skip_analysis:
                 analysis_b64 = base64.b64encode(png).decode("ascii")

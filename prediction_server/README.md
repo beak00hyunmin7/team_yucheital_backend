@@ -350,7 +350,8 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
 ## 응답 (`POST /api/predict`, multipart)
 
 폼 필드: `mode`(image|terrain|hand), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
-`light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false
+`light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false,
+`mark_x`·`mark_y`(선택, 그림 좌표 0~1·왼쪽 위 기준: 분석 지도의 ★를 이 자리에. 웹 화면이 120초 침수 위험지역으로 고른 배수구를 넘긴다. 없으면 예측 유출 최대 칸)
 
 ```json
 {
