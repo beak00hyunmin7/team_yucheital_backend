@@ -174,17 +174,52 @@ def _levels(st: np.ndarray):
         idx = ndi.distance_transform_edt(~valid, return_distances=False, return_indices=True)
         L = L[idx[0], idx[1]]                   # 선 자리는 가장 가까운 빈 곳의 층으로
     top = int(L.max())
-    return L, top
+    regions = {k: v for k, v in lvl.items() if sizes[k - 1] >= 30}
+    return L, top, lab, regions, reach
 
 
-def _smooth(L: np.ndarray, ramp: float = 0.06) -> np.ndarray:
-    s = L.shape[0]
-    out = np.zeros_like(L)
-    for k in range(1, int(L.max()) + 1):
-        inside = L >= k
-        d = ndi.distance_transform_edt(inside) - ndi.distance_transform_edt(~inside)
-        out += np.clip(0.5 + d / (ramp * s), 0, 1)
-    return ndi.gaussian_filter(out, s * 0.008)
+def _height(st: np.ndarray, lab: np.ndarray, regions: dict, reach: int, foot: float = 0.10) -> np.ndarray:
+    """층 -> 이어진 고도 (층 단위). 동그라미 선이 곧 등고선이다.
+
+    예전에는 층마다 계단을 만들고 경계만 살짝 기울였더니, 동그라미 사이가 넓으면 그 사이가 평평한
+    '계단 논'이 되어 AI 가 산 중턱에 물 띠를 그렸다. 실제 등고선처럼 선 사이를 끊김 없이 잇는다:
+      - 선 위 = 그 선 안쪽 층 값 (바깥 선 1, 그다음 2 …)
+      - 두 선 사이 = 바깥 선에서 안쪽 선까지 거리 비율로 k -> k+1
+      - 가장 안쪽(꼭대기) = 안쪽으로 갈수록 둥글게 조금 더 (+0.6)
+      - 바깥 평지 = 산 밑동에서 그림 한 변의 10% 거리 안에서 1 -> 0 으로 완만하게
+    """
+    S = st.shape[0]
+    R = np.full(st.shape, -1.0)
+    for k, v in regions.items():
+        R[lab == k] = v
+    V = ndi.grey_dilation(R, size=2 * reach + 1)          # 선 픽셀 값 = 닿은 빈 곳 중 가장 높은 층(안쪽)
+    V[~st] = -1
+    top = int(max(regions.values())) if regions else 0
+    D = {v: ndi.distance_transform_edt(~(st & (V == v))) if (st & (V == v)).any() else None
+         for v in range(1, top + 2)}
+    H = np.full(st.shape, np.nan)
+    H[st] = np.clip(V[st], 0, None)
+    for k, v in regions.items():
+        M = lab == k
+        inner = st & (V == v + 1)
+        has_inner = inner.any() and (ndi.binary_dilation(M, iterations=reach) & inner).any()
+        if v == 0:
+            if D.get(1) is not None:
+                H[M] = np.clip(1.0 - D[1][M] / (foot * S), 0.0, 1.0)
+            else:
+                H[M] = 0.0
+        elif has_inner and D.get(v) is not None:
+            do, di = D[v][M], D[v + 1][M]
+            H[M] = v + do / (do + di + 1e-6)
+        else:                                               # 꼭대기
+            do = D[v][M] if D.get(v) is not None else np.zeros(M.sum())
+            t = do / max(float(do.max()), 1.0)
+            H[M] = v + 0.6 * (1.0 - (1.0 - t) ** 2)
+    miss = np.isnan(H)
+    if miss.any():                                          # 선이 겹친 작은 틈 등은 가까운 값으로
+        idx = ndi.distance_transform_edt(miss, return_distances=False, return_indices=True)
+        H = H[idx[0], idx[1]]
+    return ndi.gaussian_filter(H, S * 0.006)
 
 
 def _preview(flat: Image.Image, L: np.ndarray, top: int, size: int = 320) -> Image.Image:
@@ -221,12 +256,12 @@ def read_drawing(raw: bytes, n: int = 96, tilt_m: float = TILT_M):
     st, blue, red = _strokes(np.asarray(flat).astype(np.int16), clear_corners=found is not None)
     if st.sum() < WORK * WORK * 0.003:
         raise HandDrawnError("파랑·빨강 선을 거의 찾지 못했습니다. 굵은 매직으로 진하게 그린 뒤 다시 찍어 주세요.")
-    L, top = _levels(st)
+    L, top, lab, regions, reach = _levels(st)
     if top < 1:
         raise HandDrawnError("닫힌 동그라미를 찾지 못했습니다. 동그라미 끝을 꼭 이어서 그려 주세요.")
     if not red.any():
         warns.append("빨강 꼭대기 표시가 없어서 가장 안쪽 동그라미를 꼭대기로 봤습니다.")
-    H = _smooth(L) * LEVEL_M
+    H = _height(st, lab, regions, reach) * LEVEL_M
     H[H < LEVEL_M * 0.05] = 0.0                 # 매끈하게 하며 평지에 남은 아주 작은 높이(등고선 잡음) 제거
     small = np.asarray(Image.fromarray(H.astype(np.float32)).resize((n, n), Image.BILINEAR), dtype=np.float64)
     terrain = np.flipud(small).copy()           # 서버 격자는 0행이 그림 아래쪽(남쪽)

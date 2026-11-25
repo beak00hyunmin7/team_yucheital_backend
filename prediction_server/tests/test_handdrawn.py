@@ -22,8 +22,8 @@ def _read(name, tilt_m=0.0):
 
 
 def _hills(terrain):
-    """따로 떨어진 산 개수 (첫 동그라미 안쪽 덩어리 수)."""
-    return ndi.label(terrain > hd.LEVEL_M * 0.5)[1]
+    """따로 떨어진 산 개수 (첫 동그라미보다 높은 덩어리 수)."""
+    return ndi.label(terrain > hd.LEVEL_M * 1.1)[1]
 
 
 class HandDrawnPhotoTest(unittest.TestCase):
