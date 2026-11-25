@@ -5,6 +5,8 @@
   - mode: "image"  -> 등고선 이미지를 그대로 모델에 입력
           "terrain" -> 등고선 데이터(고도 격자)를 학습 때와 동일한 방식으로
                        등고선 이미지로 렌더링한 뒤 모델에 입력
+          "hand"    -> 손그림 사진(파랑 겹동그라미 + 빨강 꼭대기, 모서리 네모 4개)을
+                       고도 격자로 읽은 뒤 "terrain" 과 똑같이 처리 (전시용, handdrawn.py)
   - rain_mm: 강우량(mm). FiLM 조건 체크포인트에서 사용
   - time_s : 강우 시작 후 경과 시간(초). cond_dim=2 체크포인트에서 사용
   - dx: (terrain 모드) 격자 셀 크기[m]. 등고선 이미지 모양에는 거의 영향 없음
@@ -120,6 +122,7 @@ def _gt():
 
 import contour_color as cc  # noqa: E402  (이미지 색 체계 -> 학습 형식 변환)
 from terrain_io import InvalidTerrainData, load_terrain  # noqa: E402
+import handdrawn  # noqa: E402  (손그림 사진 -> 고도 격자)
 from analysis_figure import (  # noqa: E402
     intensity_from_prediction,
     render_analysis_figure,
@@ -524,8 +527,10 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
              file: UploadFile) -> dict:
     # light=True: 시간 변화(타임랩스)용 요청. 화면이 오버레이·3D 격자만 쓰므로
     # 데이터 모드의 분석 지도·지도 그림(요청당 약 1.4초)을 건너뛴다. 기본값 False 라 기존 화면은 그대로.
-    if mode not in {"image", "terrain"}:
-        raise HTTPException(400, "mode 는 'image' 또는 'terrain' 이어야 합니다.")
+    if mode not in {"image", "terrain", "hand"}:
+        raise HTTPException(400, "mode 는 'image', 'terrain', 'hand' 중 하나여야 합니다.")
+    # 손그림은 사진을 고도 격자로 읽은 뒤부터 고도격자 모드와 같은 길을 간다
+    grid_mode = mode in {"terrain", "hand"}
 
     tag = " light" if light else (" -분석지도" if skip_analysis else "") + (" -지도" if skip_map else "")
     tm = _StepTimer(f"{mode} t={time_s:g}s{tag}")
@@ -549,6 +554,7 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
     tm.mark("업로드읽기")
     color_info: dict | None = None
     original_img: Image.Image | None = None
+    hand_preview_b64: str | None = None
 
     try:
         if mode == "image":
@@ -595,20 +601,26 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             tm.mark("이미지열기+색변환")
         else:
             # 같은 파일이 시점마다 7번 오므로 읽기·등고선 그리기 결과를 기억한다. dx 가 다르면 다른 그림이다
-            t_key = (hashlib.md5(raw).hexdigest(), Path(file.filename or "").suffix.lower(), float(dx))
+            suffix = "#hand" if mode == "hand" else Path(file.filename or "").suffix.lower()
+            t_key = (hashlib.md5(raw).hexdigest(), suffix, float(dx))
             cached = _TERRAIN_CACHE.get(t_key)
             if cached is None:
-                terrain, tmeta = load_terrain(raw, file.filename or "upload")
+                if mode == "hand":
+                    terrain, tmeta = _read_hand(raw)
+                else:
+                    terrain, tmeta = load_terrain(raw, file.filename or "upload")
             else:
                 terrain, tmeta, contour_img = cached
-            meta.update(tmeta)
+            hand_preview_b64 = tmeta.get("hand_preview_png_base64")
+            meta.update({k: v for k, v in tmeta.items() if k != "hand_preview_png_base64"})
             effective_dx = float(tmeta.get("cellsize_m") or dx)
             meta["dx_m"] = effective_dx
             warns.extend(tmeta.get("warnings") or [])
-            # 셀 크기를 파일에서 읽었으면 축소 후 격자·셀 크기가 서로 맞고, 아니면 입력한 셀 크기는 원본 격자 기준이다
-            dom_shape = terrain.shape if tmeta.get("cellsize_m") else tuple(tmeta.get("original_shape") or terrain.shape)
-            warns.extend(_domain_warnings(dom_shape, effective_dx, bool(tmeta.get("cellsize_m"))))
-            tm.mark("파일읽기")
+            if mode == "terrain":
+                # 셀 크기를 파일에서 읽었으면 축소 후 격자·셀 크기가 서로 맞고, 아니면 입력한 셀 크기는 원본 격자 기준이다
+                dom_shape = terrain.shape if tmeta.get("cellsize_m") else tuple(tmeta.get("original_shape") or terrain.shape)
+                warns.extend(_domain_warnings(dom_shape, effective_dx, bool(tmeta.get("cellsize_m"))))
+            tm.mark("파일읽기" if mode == "terrain" else "손그림읽기")
             if cached is None:
                 contour_img = _render_contour(terrain, effective_dx)
                 if len(_TERRAIN_CACHE) >= _TERRAIN_CACHE_MAX:
@@ -638,7 +650,7 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
         analysis_b64 = None
         map_b64 = None
         drain = None
-        if mode == "terrain":
+        if grid_mode:
             with _HEAVY_LOCK:
                 # render_contour_rgb 가 등고선 이미지를 상하반전(matplotlib Y축 위쪽)해서
                 # 만들기 때문에, 그 이미지를 통과한 예측도 terrain 배열 기준으로는 상하반전
@@ -677,7 +689,7 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
 
         # 지도 위 요약 숫자. 예측 그림을 수심[m]으로 되돌려(학습 때 쓴 Blues 역변환) 잰다.
         # 이미지 모드는 격자 정보가 없어 학습 격자(96x96)로 환산하므로 면적 비율만 의미가 있다.
-        gh, gw = terrain.shape if mode == "terrain" else (96, 96)
+        gh, gw = terrain.shape if grid_mode else (96, 96)
         depth_grid = np.ascontiguousarray(np.flipud(
             _depth_from_image(pred_img.resize((gw, gh), Image.BICUBIC))))
         stats = {
@@ -699,13 +711,15 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
         "contour_png_base64": None if light else _b64(contour_img),
         "original_png_base64": _b64(original_img) if (original_img is not None and not light) else None,
         "color_info": color_info,
+        # 손그림 모드: '이렇게 읽었어요' 그림 (왼쪽 = 반듯하게 편 사진, 오른쪽 = 읽은 높이 층)
+        "hand_preview_png_base64": None if light else hand_preview_b64,
         "prediction_png_base64": None if light else _b64(pred_img),
         "overlay_png_base64": _b64(overlay_img),
         "analysis_png_base64": analysis_b64,
         "map_jpg_base64": map_b64,
         "stats": stats,
-        "grid3d": _grid3d(contour_img, pred_img, terrain if mode == "terrain" else None,
-                          effective_dx if mode == "terrain" else None, skip_height=light),
+        "grid3d": _grid3d(contour_img, pred_img, terrain if grid_mode else None,
+                          effective_dx if grid_mode else None, skip_height=light),
         "drain_candidate": drain,
         "checkpoint": os.path.basename(str(current_checkpoint())),
         "meta": {**meta, "warnings": warns},
@@ -834,6 +848,23 @@ def _domain_warnings(shape: tuple[int, int], dx: float, dx_from_file: bool) -> l
     if max(h, w) / max(min(h, w), 1) > 1.2:
         out.append(f"지도가 정사각형이 아닙니다({h}x{w}). 모델은 정사각형 지형으로 학습되어 가장자리 결과가 부정확할 수 있습니다.")
     return out
+
+
+HAND_GRID_N = 96                    # 손그림을 읽는 격자 = 학습 격자 (96칸 x 10.42 m = 1 km)
+
+
+def _read_hand(raw: bytes) -> tuple[np.ndarray, dict]:
+    """손그림 사진 -> (고도 격자, 메타). 학습 지형과 같은 1 km / 96칸으로 만든다."""
+    terrain, preview, info, hwarns = handdrawn.read_drawing(raw, n=HAND_GRID_N)
+    meta = {
+        "source_format": "hand_drawing",
+        "cellsize_m": TRAIN_EXTENT_M / HAND_GRID_N,
+        "hand_levels": info["levels"],
+        "hand_markers_found": info["markers_found"],
+        "warnings": hwarns,
+        "hand_preview_png_base64": _b64(preview),
+    }
+    return terrain, meta
 
 
 def _render_contour(terrain: np.ndarray, dx: float) -> Image.Image:

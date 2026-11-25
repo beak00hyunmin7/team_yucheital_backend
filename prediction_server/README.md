@@ -112,7 +112,7 @@ prediction_server/
 
 ## 테스트
 
-단위 테스트 — torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구):
+단위 테스트 — torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구, 손그림 사진 읽기):
 
 ```powershell
 cd prediction_server
@@ -244,12 +244,28 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
   (입력 등고선 / 예측 배수맵 / 오버레이)만 반환.
 - 한글 라벨은 `Malgun Gothic` 폰트 사용 (Windows 기본). 없으면 fallback.
 
-## 입력 방식 2가지 (사용자가 화면에서 선택)
+## 입력 방식 3가지 (사용자가 화면에서 선택)
 
 | 방식 | 보내는 것 | 서버 처리 | 언제 |
 |---|---|---|---|
 | **등고선 이미지** | PNG/JPG 등 | `terrain` 색 체계면 그대로, 아니면 색을 높이로 복원해 `terrain` 으로 다시 그려 모델 입력 (아래) | 등고선 이미지만 있을 때 |
 | **등고선 데이터** | 고도 격자 파일 | 학습과 동일한 `render_contour_rgb` 로 등고선 이미지를 만든 뒤 모델 입력 | 원본 DEM/격자를 가지고 있을 때 (스타일 불일치가 없어 더 정확) |
+| **손그림** (`mode=hand`) | 학습지 사진 (폰 카메라) | 사진을 고도 격자(1 km, 96칸)로 읽은 뒤 등고선 데이터와 똑같이 처리 (아래) | 전시 체험: 관람객이 직접 그린 산 |
+
+### 손그림 모드 (`handdrawn.py`, 전시용)
+
+학습지 규칙: 네모 칸 네 모서리에 검은 네모(왼쪽 위만 속이 빈 네모), 안에 **파랑 동그라미를 여러 겹**(안쪽일수록 높음),
+꼭대기는 **빨강**. 굵은 유성 매직 권장. 동그라미는 끝까지 닫고, 선끼리 닿지 않게.
+
+1. 모서리 네모 4개를 찾아 비스듬한 사진을 정사각형으로 편다 (빈 네모가 왼쪽 위 → 사진이 돌아가 있어도 방향을 맞춘다)
+2. 파랑·빨강 선만 남긴다 (튄 잉크 점은 버림)
+3. 종이 테두리와 이어진 빈 곳 = 0층, 선을 하나 넘을 때마다 +1층 → 층 사이를 매끈하게 이어 고도로 (한 층 10 m)
+4. 96×96 고도 격자로 만들어 등고선 데이터 모드와 같은 길(분석 지도·시간 변화·3D)로 예측
+
+- 응답에 `hand_preview_png_base64`(왼쪽 = 편 사진, 오른쪽 = 읽은 층)가 추가된다. 화면의 "이렇게 읽었어요" 그림.
+- 모서리 네모를 못 찾으면 사진 전체를 읽고 주의 문구를 띄운다. 선을 못 찾거나 닫힌 동그라미가 없으면 422 와 안내 문구.
+- 한 장 읽는 데 약 0.3 초(노트북 CPU). numpy·scipy·pillow 만 써서 추가 설치 없음.
+- 그림 밖은 평평한 땅(0 m)이다.
 
 ### 이미지 색 체계와 높낮이 반전 (`contour_color.py`)
 
@@ -331,17 +347,18 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
 
 ## 응답 (`POST /api/predict`, multipart)
 
-폼 필드: `mode`(image|terrain), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
+폼 필드: `mode`(image|terrain|hand), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
 `light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false
 
 ```json
 {
   "contour_png_base64":   "…",   // 실제로 모델에 들어간 등고선 (색 체계를 변환했으면 변환본)
   "original_png_base64":  "…",   // 색 체계를 변환했을 때 올린 원본 (아니면 null)
+  "hand_preview_png_base64": "…", // hand 모드: 읽은 결과 (편 사진 | 읽은 층). 아니면 null
   "color_info":           { "scheme": "gray", "converted": true, "reversed": false, "legend": ["#000000", "…"], "warnings": [] },
   "prediction_png_base64":"…",   // 예측 배수맵
   "overlay_png_base64":   "…",   // 등고선 + 예측 겹침
-  "analysis_png_base64":  "…",   // terrain 모드: 제목·컬러바가 있는 분석 지도
+  "analysis_png_base64":  "…",   // terrain·hand 모드: 제목·컬러바가 있는 분석 지도
   "map_jpg_base64":       "…",   // terrain 모드: 제목·컬러바·별표 없는 정사각 지도(JPEG). 웹 화면이 꽉 채워 쓰고 배수구 후보는 HTML 로 얹는다
   "stats": { "max_depth_cm": 27.3, "wet_area_pct": 20.3, "wet_threshold_cm": 5.0 },   // 지도 위 요약 칩
   "grid3d": { "n": 96, "height_u16": "…", "depth_u16": "…", "depth_unit_m": 0.0001, "max_depth_m": 0.14, "relief_m": null, "extent_m": null },
