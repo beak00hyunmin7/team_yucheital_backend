@@ -96,14 +96,27 @@ from src.inference_api import (  # noqa: E402  (경로 설정 후 import)
     predict_from_image,
 )
 from src.utils.render_fields import render_contour_rgb  # noqa: E402
-from src.ground_truth import (  # noqa: E402
-    GroundTruth,
-    compare as gt_compare,
-    depth_from_prediction_image,
-    group_key,
-    render_gt_png_bytes,
-    split_of,
-)
+from src.inference_api import _LUT, _LUT_N  # noqa: E402  (수심 역변환 색표)
+from src.utils.render_fields import norm_to_depth  # noqa: E402
+from scipy.spatial import cKDTree  # noqa: E402
+
+# 검증 탭 전용(ground_truth -> scripts/prepare_openfoam_dataset)은 처음 쓸 때 불러온다.
+# 학습 스크립트가 바뀌거나 없어도 예측 서버 기동은 깨지지 않게.
+_GT_MOD = None
+_GT_STORE = None
+
+
+def _ground_truth():
+    global _GT_MOD, _GT_STORE
+    if _GT_MOD is None:
+        import src.ground_truth as m
+        _GT_MOD, _GT_STORE = m, m.GroundTruth()
+    return _GT_MOD
+
+
+def _gt():
+    _ground_truth()
+    return _GT_STORE
 
 import contour_color as cc  # noqa: E402  (이미지 색 체계 -> 학습 형식 변환)
 from terrain_io import InvalidTerrainData, load_terrain  # noqa: E402
@@ -126,6 +139,7 @@ TIME_MIN_S, TIME_MAX_S = 0.0, 120.0            # 학습 데이터가 다룬 경�
 # 가장 덜 잠긴 상태를 보여주게 된다 (deploy_package/README.md 의 권장값은 이 점에서 틀렸다).
 # 기본값은 가장 심한 시점 쪽인 18s 로 둔다.
 DEFAULT_TIME_S = 18.0
+TIMELAPSE_TIMES_S = [18.0, 38.0, 59.0, 79.0, 100.0, 120.0]   # 학습 데이터의 시점(시간 변화 재생용)
 DEFAULT_DX_M = 10.4166667                       # 1000m / 96격자
 WET_THRESHOLD_M = 0.05                          # '침수'로 세는 최소 수심 (5cm). 평가 지표 IoU@5cm 와 같은 기준
 # 샘플 지형 그림(검증·데모용). 학습 데이터라 저장소에는 없고, 있을 때만 /api/samples 가 동작한다
@@ -133,7 +147,6 @@ SAMPLES_DIR = Path(os.environ.get("YUCHE_SAMPLES_DIR", AI_MODEL_DIR / "data" / "
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 _HEAVY_LOCK = threading.Lock()                  # matplotlib/torch 직렬화 (데모 규모)
-_GT = GroundTruth()                             # 검증 탭용 OpenFOAM 정답 조회
 
 app = FastAPI(title="예측 배수맵 API", version="1.0.0")
 app.add_middleware(
@@ -204,6 +217,7 @@ auth.init_db()   # 기동 시 테이블 생성 시도. 실패해도 latch 하지
 # --------------------------------------------------------------------------- #
 # 라우트
 # --------------------------------------------------------------------------- #
+AUTH_REQUIRED = os.environ.get("YUCHE_AUTH_REQUIRED", "0") == "1"
 _NO_CACHE = {"Cache-Control": "no-cache"}   # 화면 파일을 고치면 새로고침만으로 반영되게
 
 
@@ -245,6 +259,8 @@ def health() -> dict:
         "time_conditioned": cond_dim == 2,
         "time_range_s": [TIME_MIN_S, TIME_MAX_S],
         "default_time_s": DEFAULT_TIME_S,
+        "timelapse_times": TIMELAPSE_TIMES_S,      # 화면 vtkjs.html TIMELAPSE_TIMES 와 같은 값의 원본
+        "drain_ref_time_s": DEFAULT_TIME_S,
         "image_size": _safe_image_size(),
         "device": _device(),
         "auth_enabled": auth.db_ready(),
@@ -273,7 +289,7 @@ def _base_terrain_id(stem: str) -> str:
     `_t{idx}` 가 붙은 뒤로 증강 접미사를 못 떼서, 같은 지형의 회전본이 서로 다른
     지형으로 집계됐다(샘플 갤러리에 같은 지형이 여러 번 뜨는 원인).
     """
-    return group_key(stem)
+    return _ground_truth().group_key(stem)
 
 
 @app.get("/api/samples")
@@ -327,7 +343,7 @@ def _gt_max_depth(name: str) -> float | None:
     """그 케이스의 정답 최대 수심[m]. 없으면 None."""
     if name in _GT_MAX_CACHE:
         return _GT_MAX_CACHE[name]
-    g = _GT.get(name)
+    g = _gt().get(name)
     v = float(g["depth_m"].max()) if g is not None else None
     if v is not None:
         _GT_MAX_CACHE[name] = v
@@ -350,7 +366,7 @@ def testset(split: str = "val", limit: int = 24, min_depth_m: float = 0.05) -> d
     # 지형당 1개만, 지역별로 고르게
     by_region: dict[str, dict[str, str]] = {}
     for p in sorted(SAMPLES_DIR.glob("*.png")):
-        sp = split_of(p.name)
+        sp = _ground_truth().split_of(p.name)
         if split != "any" and sp != split:
             continue
         terrain = _base_terrain_id(p.stem)
@@ -386,7 +402,7 @@ def testset(split: str = "val", limit: int = 24, min_depth_m: float = 0.05) -> d
 
     return {"split": split, "count": len(cases), "min_depth_m": min_depth_m,
             "filtered_out": filtered_out, "scanned": scanned,
-            "cases": [{"name": n, "split": split_of(n),
+            "cases": [{"name": n, "split": _ground_truth().split_of(n),
                        "gt_max_m": _gt_max_depth(n)} for n in cases]}
 
 
@@ -401,7 +417,7 @@ def testcase(name: str) -> dict:
     if not str(path).startswith(str(SAMPLES_DIR.resolve())) or not path.is_file():
         raise HTTPException(404, "샘플을 찾을 수 없습니다.")
 
-    gt = _GT.get(name)
+    gt = _gt().get(name)
     if gt is None:
         raise HTTPException(
             422, f"'{name}' 의 OpenFOAM 원본 정답을 찾지 못했습니다 "
@@ -417,13 +433,13 @@ def testcase(name: str) -> dict:
 
     with _HEAVY_LOCK:
         pred_img = predict_from_image(contour_img, **cond_kwargs)
-        pred_depth = depth_from_prediction_image(pred_img, gt["depth_m"].shape)
-        truth_png = render_gt_png_bytes(gt["depth_m"])
+        pred_depth = _ground_truth().depth_from_prediction_image(pred_img, gt["depth_m"].shape)
+        truth_png = _ground_truth().render_gt_png_bytes(gt["depth_m"])
 
-    metrics = gt_compare(pred_depth, gt["depth_m"])
+    metrics = _ground_truth().compare(pred_depth, gt["depth_m"])
     return {
         "name": name,
-        "split": split_of(name),
+        "split": _ground_truth().split_of(name),
         "region": gt["region"],
         "sample": gt["sample"],
         "rain_mm": gt["rain_mm"],
@@ -453,14 +469,16 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
     반대 방향(기동 때 끊겨 있다가 뒤에 살아남)은 auth.db_ready() 가 맡는다 - 기동 시점의
     판정을 상수로 들고 있으면 그 뒤로 영원히 인증이 꺼진 채 고정되기 때문이다.
     """
-    if not auth.db_ready():
-        return None
-    try:
-        return auth.require_user(authorization)
-    except HTTPException:
-        if auth.db_status() != "ok":
-            return None
-        raise
+    # 토큰 검사는 HMAC 계산뿐이라 DB 가 필요 없다. 유효하면 DB 를 보지 않고 통과.
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+    email = auth.verify_token(token) if token else None
+    if email:
+        return email
+    if auth.db_ready():
+        raise HTTPException(401, "로그인이 필요합니다.")
+    if AUTH_REQUIRED:   # 배포 환경: DB 가 안 되면 비로그인 예측도 막는다
+        raise HTTPException(503, "로그인 DB 에 연결할 수 없습니다. 잠시 후 다시 시도하세요.")
+    return None         # 개발 환경(기본): 지금처럼 DB 가 없으면 로그인 없이 통과
 
 
 # [속도 개선 2026-11] async def -> def + 예측은 한 번에 하나씩.
@@ -471,6 +489,7 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
 #   계산 스레드끼리 CPU 를 뺏고 뺏기느라 오히려 느려졌다(데이터 모드 첫 화면 3.4초 -> 6~7초 실측).
 #   순서대로 하면 뒤 요청이 앞 요청의 색 변환 캐시도 그대로 쓴다.
 _PREDICT_LOCK = threading.Lock()
+PREDICT_WAIT_S = float(os.environ.get("YUCHE_PREDICT_WAIT_S", "60"))   # 앞 예측을 기다리는 최대 시간
 
 
 @app.post("/api/predict")
@@ -490,9 +509,14 @@ def predict(
     # no_analysis / no_map (데이터 모드만 의미 있음): 첫 화면은 '사용자 시점' 요청과 '배수구 기준 시점(18초)'
     # 요청을 같이 보내는데, 화면은 앞 요청의 지도(map)와 뒤 요청의 분석 지도(analysis)만 쓴다.
     # 쓰지 않는 그림을 빼달라는 표시. 기본값 False 라 보내지 않으면 지금처럼 둘 다 그린다.
-    with _PREDICT_LOCK:
+    if not _PREDICT_LOCK.acquire(timeout=PREDICT_WAIT_S):
+        raise HTTPException(503, "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.",
+                            headers={"Retry-After": "10"})
+    try:
         return _predict(mode, rain_mm, time_s, dx, color_scheme, reverse,
                         light or no_analysis, light or no_map, light, file)
+    finally:
+        _PREDICT_LOCK.release()
 
 
 def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
@@ -570,7 +594,13 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             meta["color_reversed"] = conv.reversed
             tm.mark("이미지열기+색변환")
         else:
-            terrain, tmeta = load_terrain(raw, file.filename or "upload")
+            # 같은 파일이 시점마다 7번 오므로 읽기·등고선 그리기 결과를 기억한다. dx 가 다르면 다른 그림이다
+            t_key = (hashlib.md5(raw).hexdigest(), Path(file.filename or "").suffix.lower(), float(dx))
+            cached = _TERRAIN_CACHE.get(t_key)
+            if cached is None:
+                terrain, tmeta = load_terrain(raw, file.filename or "upload")
+            else:
+                terrain, tmeta, contour_img = cached
             meta.update(tmeta)
             effective_dx = float(tmeta.get("cellsize_m") or dx)
             meta["dx_m"] = effective_dx
@@ -579,7 +609,11 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             dom_shape = terrain.shape if tmeta.get("cellsize_m") else tuple(tmeta.get("original_shape") or terrain.shape)
             warns.extend(_domain_warnings(dom_shape, effective_dx, bool(tmeta.get("cellsize_m"))))
             tm.mark("파일읽기")
-            contour_img = _render_contour(terrain, effective_dx)
+            if cached is None:
+                contour_img = _render_contour(terrain, effective_dx)
+                if len(_TERRAIN_CACHE) >= _TERRAIN_CACHE_MAX:
+                    _TERRAIN_CACHE.pop(next(iter(_TERRAIN_CACHE)))
+                _TERRAIN_CACHE[t_key] = (terrain, tmeta, contour_img)
             tm.mark("등고선그리기")
 
         # 체크포인트가 요구하는 조건만 넘긴다 (0=없음, 1=rain, 2=rain+time).
@@ -643,8 +677,9 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
 
         # 지도 위 요약 숫자. 예측 그림을 수심[m]으로 되돌려(학습 때 쓴 Blues 역변환) 잰다.
         # 이미지 모드는 격자 정보가 없어 학습 격자(96x96)로 환산하므로 면적 비율만 의미가 있다.
-        depth_grid = depth_from_prediction_image(
-            pred_img, terrain.shape if mode == "terrain" else (96, 96))
+        gh, gw = terrain.shape if mode == "terrain" else (96, 96)
+        depth_grid = np.ascontiguousarray(np.flipud(
+            _depth_from_image(pred_img.resize((gw, gh), Image.BICUBIC))))
         stats = {
             "max_depth_cm": round(float(depth_grid.max()) * 100.0, 1),
             "wet_area_pct": round(float((depth_grid > WET_THRESHOLD_M).mean()) * 100.0, 1),
@@ -660,16 +695,17 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
         raise HTTPException(422, str(exc)) from exc
 
     result = {
-        "contour_png_base64": _b64(contour_img),
-        "original_png_base64": _b64(original_img) if original_img is not None else None,
+        # light(시간 변화용)는 화면이 overlay 와 grid3d.depth_u16 만 쓴다 -> 나머지 그림은 만들지 않는다
+        "contour_png_base64": None if light else _b64(contour_img),
+        "original_png_base64": _b64(original_img) if (original_img is not None and not light) else None,
         "color_info": color_info,
-        "prediction_png_base64": _b64(pred_img),
+        "prediction_png_base64": None if light else _b64(pred_img),
         "overlay_png_base64": _b64(overlay_img),
         "analysis_png_base64": analysis_b64,
         "map_jpg_base64": map_b64,
         "stats": stats,
         "grid3d": _grid3d(contour_img, pred_img, terrain if mode == "terrain" else None,
-                          effective_dx if mode == "terrain" else None),
+                          effective_dx if mode == "terrain" else None, skip_height=light),
         "drain_candidate": drain,
         "checkpoint": os.path.basename(str(current_checkpoint())),
         "meta": {**meta, "warnings": warns},
@@ -692,6 +728,29 @@ GRID3D_N = 96                       # 3D 보기용 격자 한 변 (학습 격자
 _HEIGHT_CACHE: dict[str, np.ndarray] = {}   # 시점별 예측(같은 지형 6~7번 요청)에서 높이 복원을 한 번만 하도록
 _CONV_CACHE: dict = {}              # (그림 md5, 색 체계, 반전) -> cc.Conversion. 시간 변화 요청마다 색 변환을 다시 하지 않도록
 _CONV_CACHE_MAX = 16
+_TERRAIN_CACHE: dict = {}           # (파일 md5, 확장자, dx) -> (terrain, tmeta, 등고선 그림)
+_TERRAIN_CACHE_MAX = 16
+
+
+_LUT_TREE = cKDTree(_LUT.astype(np.float64))
+
+
+def _depth_from_image(img: Image.Image) -> np.ndarray:
+    """예측 그림 -> 수심[m]. ai_model 의 _image_to_depth 와 같은 결과.
+
+    원본은 (픽셀 수 x 256색 x 3) 배열을 한 번에 만들어 512x512 에서 1.5GB 를 쓴다.
+    KD-tree 로 가장 가까운 색을 찾고, 1위·2위 거리 차가 0.001 미만인 픽셀만 원래 식(float32 argmin)으로
+    다시 골라 동점 처리까지 같게 맞춘다.
+    """
+    rgb = np.asarray(img.convert("RGB"), dtype=np.float32)
+    flat = rgb.reshape(-1, 3)
+    d, idx = _LUT_TREE.query(flat.astype(np.float64), k=2)
+    best = idx[:, 0].copy()
+    amb = np.nonzero(d[:, 1] - d[:, 0] < 1e-3)[0]
+    if len(amb):
+        sub_ = flat[amb]
+        best[amb] = ((sub_[:, None, :] - _LUT[None, :, :]) ** 2).sum(-1).argmin(1)
+    return norm_to_depth((best / (_LUT_N - 1)).reshape(rgb.shape[:2]))
 
 
 def _u16_b64(arr01: np.ndarray, scale: float) -> str:
@@ -701,7 +760,7 @@ def _u16_b64(arr01: np.ndarray, scale: float) -> str:
 
 
 def _grid3d(contour_img: Image.Image, pred_img: Image.Image,
-            terrain: np.ndarray | None, dx: float | None) -> dict | None:
+            terrain: np.ndarray | None, dx: float | None, skip_height: bool = False) -> dict | None:
     """웹 화면의 3D 지형 보기용 격자. 실패해도 예측 자체는 돌려줘야 하므로 None 으로 넘긴다.
 
     둘 다 '그림 방향'(0행 = 화면 위쪽, 입력 등고선·예측 그림과 같은 방향)이다.
@@ -713,8 +772,6 @@ def _grid3d(contour_img: Image.Image, pred_img: Image.Image,
         import hashlib
 
         from scipy.ndimage import gaussian_filter
-        from src.inference_api import _image_to_depth
-
         n = GRID3D_N
         relief_m = extent_m = None
         if terrain is not None:
@@ -739,11 +796,11 @@ def _grid3d(contour_img: Image.Image, pred_img: Image.Image,
         lo, hi = float(h.min()), float(h.max())
         hn = (h - lo) / (hi - lo) if hi - lo > 1e-9 else np.zeros_like(h)
 
-        depth = _image_to_depth(pred_img.resize((n, n), Image.BICUBIC))   # 그림 방향 수심[m]
+        depth = _depth_from_image(pred_img.resize((n, n), Image.BICUBIC))   # 그림 방향 수심[m]
         unit = 1e-4                                                       # 0.1mm 단위 (최대 6.5m)
         return {
             "n": n,
-            "height_u16": _u16_b64(hn, 65535.0),
+            "height_u16": None if skip_height else _u16_b64(hn, 65535.0),   # 지형은 첫 응답에서 한 번만
             "depth_u16": _u16_b64(np.clip(depth, 0.0, None), 1.0 / unit),
             "depth_unit_m": unit,
             "max_depth_m": round(float(np.max(depth)), 4),

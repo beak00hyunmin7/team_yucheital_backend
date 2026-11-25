@@ -70,7 +70,9 @@ def _load_secret() -> bytes:
 SECRET = _load_secret()
 TOKEN_TTL = 60 * 60 * 12  # 12시간
 
-engine = create_engine(DB_URL, pool_pre_ping=True, pool_recycle=280)
+DB_CONNECT_TIMEOUT_S = int(os.environ.get("YUCHE_DB_CONNECT_TIMEOUT", "2"))
+engine = create_engine(DB_URL, pool_pre_ping=True, pool_recycle=280,
+                       connect_args={"connect_timeout": DB_CONNECT_TIMEOUT_S})
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -165,7 +167,7 @@ def _poke_wsl() -> None:
     _last_poke = time.time()
     try:
         subprocess.run(["wsl", "-d", _WSL_DISTRO, "-u", "root", "--", "true"],
-                       timeout=20, capture_output=True,
+                       timeout=5, capture_output=True,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:  # noqa: BLE001  (wsl 이 없거나 느려도 요청 자체는 아래에서 처리)
         pass
