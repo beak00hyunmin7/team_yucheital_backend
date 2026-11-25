@@ -24,6 +24,10 @@ from scipy import ndimage as ndi
 
 WORK = 512            # 펴서 읽는 해상도 (한 변 픽셀)
 LEVEL_M = 10.0        # 한 층 높이[m]. 모델은 고저차를 안 보므로 값 자체는 결과에 영향 없음
+# 그림 밖 땅을 위(북)쪽이 높고 아래(남)쪽이 낮게 살짝 기울인다[m].
+# 완전히 평평하면 등고선 그림에서 그림 밖 전체가 '가장 낮은 색'이 되어, AI 가 산 주변 평지 전체를
+# 물웅덩이로 본다(학습 지형에는 평평한 땅이 없다). 기울이면 물이 아래쪽·산 사이 골짜기로 모인다.
+TILT_M = 15.0
 
 
 class HandDrawnError(ValueError):
@@ -196,8 +200,11 @@ def _preview(flat: Image.Image, L: np.ndarray, top: int, size: int = 320) -> Ima
     return canvas
 
 
-def read_drawing(raw: bytes, n: int = 96):
-    """사진 바이트 -> (terrain[n x n, m, 0행=남쪽], preview 그림, 정보, 주의 문구)."""
+def read_drawing(raw: bytes, n: int = 96, tilt_m: float = TILT_M):
+    """사진 바이트 -> (terrain[n x n, m, 0행=남쪽], preview 그림, 정보, 주의 문구).
+
+    tilt_m: 그림 아래(남)쪽 끝 0 m -> 위(북)쪽 끝 tilt_m 로 땅 전체를 기울인다. 0 이면 평평.
+    """
     img = _open(raw)
     rgb = np.asarray(img).astype(np.int16)
     warns: list[str] = []
@@ -220,8 +227,11 @@ def read_drawing(raw: bytes, n: int = 96):
     if not red.any():
         warns.append("빨강 꼭대기 표시가 없어서 가장 안쪽 동그라미를 꼭대기로 봤습니다.")
     H = _smooth(L) * LEVEL_M
+    H[H < LEVEL_M * 0.05] = 0.0                 # 매끈하게 하며 평지에 남은 아주 작은 높이(등고선 잡음) 제거
     small = np.asarray(Image.fromarray(H.astype(np.float32)).resize((n, n), Image.BILINEAR), dtype=np.float64)
     terrain = np.flipud(small).copy()           # 서버 격자는 0행이 그림 아래쪽(남쪽)
-    info = {"levels": top, "markers_found": found is not None,
+    if tilt_m:
+        terrain += np.linspace(0.0, float(tilt_m), n)[:, None]
+    info = {"levels": top, "markers_found": found is not None, "tilt_m": float(tilt_m),
             "hollow_found": bool(found and found[1])}
     return terrain, _preview(flat, L, top), info, warns

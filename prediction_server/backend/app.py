@@ -851,16 +851,19 @@ def _domain_warnings(shape: tuple[int, int], dx: float, dx_from_file: bool) -> l
 
 
 HAND_GRID_N = 96                    # 손그림을 읽는 격자 = 학습 격자 (96칸 x 10.42 m = 1 km)
+# 손그림 땅 기울기[m] (위쪽 높고 아래쪽 낮게). 0 이면 평평 -> 산 밖 평지 전체가 물로 나온다 (handdrawn.TILT_M 참고)
+HAND_TILT_M = float(os.environ.get("YUCHE_HAND_TILT_M", str(handdrawn.TILT_M)))
 
 
 def _read_hand(raw: bytes) -> tuple[np.ndarray, dict]:
     """손그림 사진 -> (고도 격자, 메타). 학습 지형과 같은 1 km / 96칸으로 만든다."""
-    terrain, preview, info, hwarns = handdrawn.read_drawing(raw, n=HAND_GRID_N)
+    terrain, preview, info, hwarns = handdrawn.read_drawing(raw, n=HAND_GRID_N, tilt_m=HAND_TILT_M)
     meta = {
         "source_format": "hand_drawing",
         "cellsize_m": TRAIN_EXTENT_M / HAND_GRID_N,
         "hand_levels": info["levels"],
         "hand_markers_found": info["markers_found"],
+        "hand_tilt_m": info["tilt_m"],
         "warnings": hwarns,
         "hand_preview_png_base64": _b64(preview),
     }

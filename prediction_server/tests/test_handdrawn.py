@@ -17,8 +17,8 @@ import handdrawn as hd
 SAMPLES = Path(__file__).resolve().parent / "handdrawn_samples"
 
 
-def _read(name):
-    return hd.read_drawing((SAMPLES / name).read_bytes())
+def _read(name, tilt_m=0.0):
+    return hd.read_drawing((SAMPLES / name).read_bytes(), tilt_m=tilt_m)
 
 
 def _hills(terrain):
@@ -39,11 +39,11 @@ class HandDrawnPhotoTest(unittest.TestCase):
 
     def test_rotated_photo_gives_same_terrain(self):
         raw = (SAMPLES / "photo1.jpg").read_bytes()
-        base = hd.read_drawing(raw)[0]
+        base = hd.read_drawing(raw, tilt_m=0)[0]
         for ang in (90, 180, 270):
             buf = io.BytesIO()
             Image.open(io.BytesIO(raw)).rotate(ang, expand=True).save(buf, "PNG")
-            t = hd.read_drawing(buf.getvalue())[0]
+            t = hd.read_drawing(buf.getvalue(), tilt_m=0)[0]
             self.assertGreater(np.corrcoef(base.ravel(), t.ravel())[0, 1], 0.98, ang)
 
     def test_top_of_photo_is_north(self):
@@ -51,6 +51,16 @@ class HandDrawnPhotoTest(unittest.TestCase):
         terrain = _read("photo1.jpg")[0]
         r, _ = np.unravel_index(np.argmax(terrain), terrain.shape)
         self.assertLess(r, 48)
+
+    def test_plain_is_tilted_not_flat(self):
+        # 그림 밖 땅이 완전히 평평하면 AI 가 평지 전체를 물웅덩이로 본다 -> 위쪽 높고 아래쪽 낮게
+        flat = _read("photo3.jpg", tilt_m=0)[0]
+        tilted = _read("photo3.jpg", tilt_m=15)[0]
+        plain = flat == 0
+        self.assertGreater(plain.mean(), 0.3)
+        self.assertAlmostEqual(float(tilted[0][plain[0]].min()), 0.0, places=3)     # 아래(남)쪽 끝 = 0 m
+        self.assertAlmostEqual(float(tilted[-1][plain[-1]].max()), 15.0, places=3)  # 위(북)쪽 끝 = 15 m
+        self.assertEqual(len(np.unique(flat[plain])), 1)                           # 평지에 잡음 없음
 
     def test_blank_paper_is_rejected(self):
         buf = io.BytesIO()
