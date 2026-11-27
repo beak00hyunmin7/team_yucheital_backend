@@ -66,6 +66,11 @@ echo       this PC    : http://127.0.0.1:8000
 echo.
 if "%BIND%"=="0.0.0.0" echo       * anyone on the same network can connect.
 echo.
+REM frontend folder. Set YUCHE_SITE_DIR before running to override.
+REM default: the frontend repo cloned next to this backend repo (team_yucheital_frontend or sejong_yucheital_project)
+if not defined YUCHE_SITE_DIR if exist "%~dp0..\..\team_yucheital_frontend\project_yucheital\yuche_frontend\vtkjs.html" set "YUCHE_SITE_DIR=%~dp0..\..\team_yucheital_frontend\project_yucheital\yuche_frontend"
+if not defined YUCHE_SITE_DIR set "YUCHE_SITE_DIR=%~dp0..\..\sejong_yucheital_project\project_yucheital\yuche_frontend"
+if not exist "%YUCHE_SITE_DIR%\vtkjs.html" echo [WARN] frontend folder not found: %YUCHE_SITE_DIR%
 "%PY%" -m uvicorn app:app --app-dir backend --host %BIND% --port 8000
 
 rem Close the keepalive window when the server stops (otherwise the WSL VM keeps its memory).
