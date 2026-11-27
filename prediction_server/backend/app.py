@@ -946,3 +946,21 @@ def _device() -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# 화면 폴더(YUCHE_SITE_DIR)의 나머지 파일 (logo.png 등). [11/27]
+# ngrok 터널 하나(8000)로 화면·API·카메라를 한 주소에서 쓰려면 화면이 쓰는 파일을 이 서버가 다 내줘야 한다.
+# 맨 끝에 둬서 위의 API 경로가 먼저 잡히게 하고, 폴더 밖·정해진 확장자 밖은 내주지 않는다.
+# --------------------------------------------------------------------------- #
+_SITE_ASSET_EXT = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".js", ".css", ".json"}
+
+
+@app.get("/{asset}", include_in_schema=False)
+def site_asset(asset: str) -> FileResponse:
+    if SITE_DIR is None or Path(asset).suffix.lower() not in _SITE_ASSET_EXT:
+        raise HTTPException(404, "없는 파일입니다.")
+    target = (SITE_DIR / asset).resolve()
+    if target.parent != SITE_DIR or not target.is_file():
+        raise HTTPException(404, "없는 파일입니다.")
+    return FileResponse(target, headers=_NO_CACHE)
