@@ -556,20 +556,30 @@ def predict_series(
         raise HTTPException(400, "times 는 '38,59,79' 처럼 쉼표로 구분한 숫자여야 합니다.") from exc
     if not ts:
         raise HTTPException(400, "times 가 비었습니다.")
-    if not _PREDICT_GATE.acquire(high=False, timeout=PREDICT_WAIT_S):
-        raise HTTPException(503, "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.",
-                            headers={"Retry-After": "10"})
-    try:
-        frames: dict[str, dict] = {}
-        for t in ts:
-            file.file.seek(0)   # 같은 업로드를 시점마다 다시 읽는다
-            try:
-                frames[f"{t:g}"] = _predict(mode, rain_mm, t, dx, color_scheme, reverse, True, True, True, file, None)
-            except HTTPException as exc:
-                frames[f"{t:g}"] = {"error": exc.detail, "status": exc.status_code}
-        return {"frames": frames}
-    finally:
-        _PREDICT_GATE.release()
+    # [11/28 수정] 업로드는 여기서 한 번만 읽는다. _predict 는 파일을 읽고 닫기 때문에, 예전처럼 같은
+    # UploadFile 을 seek(0) 해서 다시 넘기면 두 번째 시점부터 "closed file" 오류(500)가 나서 화면이
+    # 시점별 요청으로 되돌아갔다. 시점마다 메모리 사본(_reupload)을 새로 만들어 넘긴다.
+    raw = file.file.read(MAX_UPLOAD_BYTES + 1)
+    file.file.close()
+    frames: dict[str, dict] = {}
+    for t in ts:
+        # 문은 장면마다 잡고 놓는다: 그 사이 다른 사람의 첫 화면 요청이 끼어들 수 있게 (첫 화면 우선)
+        if not _PREDICT_GATE.acquire(high=False, timeout=PREDICT_WAIT_S):
+            frames[f"{t:g}"] = {"error": "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.", "status": 503}
+            continue
+        try:
+            frames[f"{t:g}"] = _predict(mode, rain_mm, t, dx, color_scheme, reverse, True, True, True,
+                                        _reupload(raw, file.filename), None)
+        except HTTPException as exc:
+            frames[f"{t:g}"] = {"error": exc.detail, "status": exc.status_code}
+        finally:
+            _PREDICT_GATE.release()
+    return {"frames": frames}
+
+
+def _reupload(raw: bytes, filename: str | None) -> UploadFile:
+    """같은 업로드 내용을 _predict 에 여러 번 넘기기 위한 메모리 사본 (_predict 가 읽고 닫아도 다음 사본은 새것)."""
+    return UploadFile(io.BytesIO(raw), filename=filename)
 
 
 def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
