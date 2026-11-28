@@ -44,11 +44,15 @@ for /L %%i in (1,1,20) do (
 echo   (warning: MariaDB did not answer within 20 s - login may not work)
 :db_done
 
-rem The WSL2 VM shuts itself down when idle and MariaDB dies with it. The Windows -> WSL
-rem 127.0.0.1:3306 forwarding can also drop on its own. Running any wsl command from Windows
-rem revives both, so while the server runs a minimized window runs "wsl ... true" every 45 s.
+rem The WSL distro stops itself about 15 s after the last command launched from Windows ends,
+rem and systemd stops MariaDB with it. A "wsl ... true" every 45 s only revived it for ~15 s, so the
+rem DB was down about 2/3 of the time (2026-11-28: journal showed MariaDB stop/start every 45 s).
+rem Fix: keep one wsl session open for the whole server run ("sleep infinity" in a minimized window),
+rem so the distro never goes idle. The 45 s "wsl ... true" loop stays as a backup for the
+rem Windows -> WSL 127.0.0.1:3306 forwarding.
 rem (the server also wakes WSL once and reconnects when a request is refused: auth.connect_with_recovery)
 echo [2/4] starting WSL keepalive...
+start "yuche-wsl-hold" /min wsl -d Ubuntu-22.04 -u root -- sleep infinity
 start "yuche-wsl-keepalive" /min cmd /c "for /l %%k in (1,0,2) do (wsl -d Ubuntu-22.04 -u root -- true & timeout /t 45 /nobreak >nul)"
 
 echo [3/4] checking server packages...
@@ -73,8 +77,9 @@ if not defined YUCHE_SITE_DIR set "YUCHE_SITE_DIR=%~dp0..\..\sejong_yucheital_pr
 if not exist "%YUCHE_SITE_DIR%\vtkjs.html" echo [WARN] frontend folder not found: %YUCHE_SITE_DIR%
 "%PY%" -m uvicorn app:app --app-dir backend --host %BIND% --port 8000
 
-rem Close the keepalive window when the server stops (otherwise the WSL VM keeps its memory).
+rem Close the keepalive windows when the server stops (otherwise the WSL VM keeps its memory).
 echo stopping WSL keepalive...
 taskkill /fi "WINDOWTITLE eq yuche-wsl-keepalive" /f >nul 2>&1
+taskkill /fi "WINDOWTITLE eq yuche-wsl-hold" /f >nul 2>&1
 
 endlocal
