@@ -109,6 +109,7 @@ prediction_server/
 | `YUCHE_SAMPLES_DIR` | `<AI_MODEL_DIR>/data/contours` | 샘플 지형 그림(학습 데이터라 저장소에 없음. 없으면 `/api/samples` 는 빈 목록) |
 | `YUCHE_SITE_DIR` | (없음) | 팀 화면 폴더(`…/yuche_frontend`). 지정하면 `/`·`/vtkjs.html`·`/style.css` 로 화면까지 내줘서 주소 하나(`:8000`)로 화면 + API. 이때 개발·검증용 화면은 `/test` |
 | `YUCHE_DB_URL` · `YUCHE_SECRET` · `YUCHE_HISTORY_DIR` · `YUCHE_WSL_DISTRO` | 아래 각 절 | |
+| `YUCHE_EXPO` · `YUCHE_EXPO_KEY` | 꺼짐 · (없음) | 전시 모드 (아래 '전시 모드' 절) |
 
 ## 테스트
 
@@ -268,6 +269,38 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
 - 그림 밖 땅은 **위쪽이 높고 아래쪽이 낮게 15 m** 기울인다(`YUCHE_HAND_TILT_M`, 0 이면 평평).
   완전히 평평하면 등고선 그림에서 그림 밖 전체가 가장 낮은 색이 되어 AI 가 산 주변 평지 전체를 물로 예측했다
   (학습 지형에는 평평한 땅이 없다). 기울이면 물이 아래쪽과 산 사이 골짜기로 모인다.
+
+### 전시 모드 (`expo.py`, `YUCHE_EXPO=1`)
+
+전시회에서 관람객이 가입·로그인 없이 체험하고, 손그림 예측 1번마다 **손그림 + 결과 그림** 짝을 서버에 모은다.
+`YUCHE_EXPO` 를 켜지 않으면 기존 동작은 그대로다.
+
+켜는 법 (서버 켜기 전, 같은 명령 창에서):
+
+```bat
+set YUCHE_EXPO=1
+set YUCHE_EXPO_KEY=팀만아는문자열
+run_windows.bat
+```
+
+`YUCHE_EXPO_KEY` 의 실제 값은 이 문서·저장소에 쓰지 말 것 (모아보기 주소의 열쇠).
+
+- `/api/health` 에 `"expo": true` → 화면이 로그인·회원가입을 건너뛰고, 왼쪽 '기록' 탭을 숨기고, 기록 저장(`/api/history`)을 하지 않는다.
+- `/api/predict` · `/api/predict/series` 가 토큰 없이 통과한다.
+- **손그림 모드의 첫 화면 `/api/predict` 요청에서만** 저장하고 응답에 `expo_id` 를 넣는다
+  (이미지·고도 격자 모드, 시간 변화(`light`)·묶음(`series`)·기준 시점·분석 지도(`no_map`) 요청은 저장하지 않음).
+  저장 위치 `data/expo/YYYYMMDD/` (git 에 안 올라감):
+  - `{expo_id}_drawing.jpg` 네모 4개 안쪽을 원본 사진에서 다시 반듯하게 편 손그림 (1024×1024)
+  - `{expo_id}_read.png` '이렇게 읽었어요' 그림
+  - **원본 사진과 업로드 파일 이름은 저장하지 않는다.** 네모 4개를 못 찾은 사진은 잘라낼 수 없어 아무것도 저장하지 않는다.
+- 화면은 빗금·배수구 계산이 끝나면 18초 지도 + 빨간 빗금 + 배수구 동그라미를 한 장(JPEG, 긴 변 1024)으로 만들어
+  `POST /api/expo/result` (`expo_id`, `result_image`, `meta`=강우량·배수구·빗금 면적·기준값 JSON) 로 보낸다.
+  입력 사진은 다시 올리지 않는다. 서버는 있는 번호 · 발급 후 10분 이내 · 한 번만 · 3MB 이하만 받고 (아니면 400)
+  `{expo_id}_result.jpg` 저장 + 같은 날짜 폴더 `records.jsonl` 에 한 줄 (시각, 강우량, 배수구, 빗금 면적, 파일 이름).
+- 모아보기 (팀 전용): `http://<서버>:8000/expo/gallery?key=<YUCHE_EXPO_KEY>` → 날짜별 [손그림 | 읽은 그림 | 결과] 와 전체 zip.
+  키가 없거나 틀리면 403. 결과가 없는 짝은 '결과 없음'.
+- 전시 후 삭제: `.venv\Scripts\python.exe clear_expo_data.py` → 건수를 보여 주고 `y` 를 입력해야 `data/expo` 전체를 지운다.
+- 시험: `tests/test_expo.py` (켬/끔 각각 토큰 없는 예측 · 손그림만 번호 · 짝 저장 · 키 없는 갤러리 403 · 원본 미저장 · 10분 지난 번호 거부)
 
 ### 이미지 색 체계와 높낮이 반전 (`contour_color.py`)
 

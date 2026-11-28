@@ -174,6 +174,15 @@ def _warp(img: Image.Image, quad: np.ndarray, size: int = WORK) -> Image.Image:
     return img.transform((size, size), Image.PERSPECTIVE, tuple(_persp_coeffs(dst, quad)), Image.BICUBIC)
 
 
+def flatten_original(raw: bytes, quad, size: int = 1024) -> Image.Image:
+    """[전시 모드] 네모 4개 안쪽을 원본 해상도 사진에서 다시 반듯하게 편다 (size x size).
+    quad 는 read_drawing 이 찾은 좌표(_open 이 1200px 로 줄인 사진 기준) -> 원본 크기로 되돌려 쓴다.
+    네모 바깥(얼굴·손 등)은 결과에 들어가지 않는다."""
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw))).convert("RGB")
+    s = min(1.0, 1200 / max(img.size))                     # _open 과 같은 축소 비율
+    return _warp(img, np.asarray(quad, dtype=float) / s, size)
+
+
 # --------------------------------------------------------------------------- #
 # 3) 선 찾기  4) 층 세기  5) 매끈하게
 # --------------------------------------------------------------------------- #
@@ -326,5 +335,7 @@ def read_drawing(raw: bytes, n: int = 96, tilt_m: float = TILT_M):
     if tilt_m:
         terrain += np.linspace(0.0, float(tilt_m), n)[:, None]
     info = {"levels": top, "markers_found": found is not None, "tilt_m": float(tilt_m),
-            "hollow_found": bool(found and found[1])}
+            "hollow_found": bool(found and found[1]),
+            # 전시 모드가 원본 사진에서 같은 자리를 다시 펴려고 쓴다 (_open 이 줄인 사진 기준 좌표)
+            "quad": np.asarray(found[0], dtype=float).tolist() if found is not None else None}
     return terrain, _preview(flat, L, top), info, warns

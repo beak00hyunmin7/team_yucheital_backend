@@ -43,7 +43,7 @@ import numpy as np
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from PIL import Image
 from sqlalchemy.exc import OperationalError
 
@@ -123,6 +123,7 @@ def _gt():
 import contour_color as cc  # noqa: E402  (이미지 색 체계 -> 학습 형식 변환)
 from terrain_io import InvalidTerrainData, load_terrain  # noqa: E402
 import handdrawn  # noqa: E402  (손그림 사진 -> 고도 격자)
+import expo  # noqa: E402  (전시 모드 YUCHE_EXPO=1: 로그인 없이 체험 + 손그림·결과 짝 모으기)
 from analysis_figure import (  # noqa: E402
     intensity_from_prediction,
     render_analysis_figure,
@@ -270,6 +271,7 @@ def health() -> dict:
         "auth_enabled": auth.db_ready(),
         "db": auth.db_status(),
         "db_error": auth.db_error() or None,
+        "expo": expo.ENABLED,                     # 전시 모드: 화면이 로그인·기록을 건너뛰고 손그림 결과를 보낸다
     }
 
 
@@ -478,6 +480,8 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
     email = auth.verify_token(token) if token else None
     if email:
         return email
+    if expo.ENABLED:    # 전시 모드: 관람객은 가입·로그인 없이 예측 (/api/predict, /api/predict/series)
+        return None
     if auth.db_ready():
         raise HTTPException(401, "로그인이 필요합니다.")
     if AUTH_REQUIRED:   # 배포 환경: DB 가 안 되면 비로그인 예측도 막는다
@@ -672,7 +676,7 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             else:
                 terrain, tmeta, contour_img = cached
             hand_preview_b64 = tmeta.get("hand_preview_png_base64")
-            meta.update({k: v for k, v in tmeta.items() if k != "hand_preview_png_base64"})
+            meta.update({k: v for k, v in tmeta.items() if k != "hand_preview_png_base64" and not k.startswith("_")})
             effective_dx = float(tmeta.get("cellsize_m") or dx)
             meta["dx_m"] = effective_dx
             warns.extend(tmeta.get("warnings") or [])
@@ -797,6 +801,15 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
             "경과 시간이 짧을수록 물이 많습니다 - 비가 초반에 내리고 이후 빠지는 시뮬레이션이라, 가장 심한 상태는 20초 부근입니다.",
         ],
     }
+    # 전시 모드: 손그림의 첫 화면 요청(시간 변화·기준 시점·분석 지도 요청 제외)마다 편 손그림 + '읽었어요' 그림을 저장하고
+    # 번호(expo_id)를 준다. 화면은 이 번호로 결과 그림을 보낸다 (/api/expo/result). 원본 사진·파일 이름은 저장하지 않는다
+    if expo.ENABLED and mode == "hand" and not skip_map:
+        quad = tmeta.get("_hand_quad")
+        if quad:
+            try:
+                result["expo_id"] = expo.save_drawing(handdrawn.flatten_original(raw, quad), hand_preview_b64)
+            except Exception as exc:  # noqa: BLE001  (저장 실패가 체험을 막으면 안 된다)
+                print(f"[expo] 손그림 저장 실패: {exc!r}")
     tm.mark("응답만들기(그림base64+3D)")
     tm.report()
     return result
@@ -933,6 +946,7 @@ def _read_hand(raw: bytes) -> tuple[np.ndarray, dict]:
         "hand_tilt_m": info["tilt_m"],
         "warnings": hwarns,
         "hand_preview_png_base64": _b64(preview),
+        "_hand_quad": info.get("quad"),   # 전시 모드가 원본 사진에서 다시 펼 자리 (응답에는 넣지 않음)
     }
     return terrain, meta
 
@@ -1006,6 +1020,54 @@ def _device() -> str:
 # 맨 끝에 둬서 위의 API 경로가 먼저 잡히게 하고, 폴더 밖·정해진 확장자 밖은 내주지 않는다.
 # --------------------------------------------------------------------------- #
 _SITE_ASSET_EXT = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".js", ".css", ".json"}
+
+
+# --------------------------------------------------------------------------- #
+# 전시 모드 (expo.py 설명)
+# --------------------------------------------------------------------------- #
+@app.post("/api/expo/result")
+def expo_result(
+    expo_id: str = Form(...),
+    meta: str = Form("{}"),
+    result_image: UploadFile = File(...),
+) -> dict:
+    """화면이 만든 결과 그림(18초 지도 + 빨간 빗금 + 배수구 동그라미)을 손그림과 짝으로 저장. 전시 모드에서만, 로그인 불필요."""
+    if not expo.ENABLED:
+        raise HTTPException(404, "전시 모드가 아닙니다.")
+    raw = result_image.file.read(expo.RESULT_MAX_BYTES + 1)
+    result_image.file.close()
+    try:
+        expo.save_result(expo_id, raw, meta)
+    except expo.ExpoError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/expo/gallery", include_in_schema=False)
+def expo_gallery(key: str = "") -> HTMLResponse:
+    """팀 전용 모아보기: 날짜별 [손그림 | 읽은 그림 | 결과]. key = YUCHE_EXPO_KEY."""
+    if not expo.key_ok(key):
+        raise HTTPException(403, "키가 맞지 않습니다.")
+    return HTMLResponse(expo.gallery_html(key), headers=_NO_CACHE)
+
+
+@app.get("/expo/gallery.zip", include_in_schema=False)
+def expo_gallery_zip(key: str = "") -> Response:
+    if not expo.key_ok(key):
+        raise HTTPException(403, "키가 맞지 않습니다.")
+    name = time.strftime("expo_%Y%m%d_%H%M.zip")
+    return Response(expo.zip_bytes(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', **_NO_CACHE})
+
+
+@app.get("/expo/file/{day}/{name}", include_in_schema=False)
+def expo_file(day: str, name: str, key: str = "") -> FileResponse:
+    if not expo.key_ok(key):
+        raise HTTPException(403, "키가 맞지 않습니다.")
+    path = expo.file_path(day, name)
+    if path is None:
+        raise HTTPException(404, "없는 파일입니다.")
+    return FileResponse(path, headers=_NO_CACHE)
 
 
 @app.get("/{asset}", include_in_schema=False)
