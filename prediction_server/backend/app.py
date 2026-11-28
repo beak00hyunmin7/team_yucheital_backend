@@ -264,6 +264,7 @@ def health() -> dict:
         "default_time_s": DEFAULT_TIME_S,
         "timelapse_times": TIMELAPSE_TIMES_S,      # 화면 vtkjs.html TIMELAPSE_TIMES 와 같은 값의 원본
         "drain_ref_time_s": DEFAULT_TIME_S,
+        "queue": _PREDICT_GATE.waiting,            # 지금 예측 순서를 기다리는 요청 수
         "image_size": _safe_image_size(),
         "device": _device(),
         "auth_enabled": auth.db_ready(),
@@ -488,10 +489,12 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
 # - 안에서 하는 일(색 변환·AI 추론·그림 그리기)이 전부 동기 계산이라, async 로 두면 예측 하나를
 #   계산하는 동안 서버 전체(로그인·기록 저장 등)가 멈췄다. def 로 두면 FastAPI 가 스레드에서
 #   돌려서 가벼운 요청은 기다리지 않는다.
-# - 대신 예측끼리는 _PREDICT_LOCK 으로 한 번에 하나씩 처리한다. 둘을 동시에 돌리면 파이썬(GIL)에서
+# - 대신 예측끼리는 _PREDICT_GATE 로 한 번에 하나씩 처리한다 (첫 화면 요청 우선). 둘을 동시에 돌리면 파이썬(GIL)에서
 #   계산 스레드끼리 CPU 를 뺏고 뺏기느라 오히려 느려졌다(데이터 모드 첫 화면 3.4초 -> 6~7초 실측).
 #   순서대로 하면 뒤 요청이 앞 요청의 색 변환 캐시도 그대로 쓴다.
-_PREDICT_LOCK = threading.Lock()
+from predict_gate import PriorityGate  # noqa: E402  (첫 화면 요청을 시간 변화 요청보다 먼저)
+
+_PREDICT_GATE = PriorityGate()
 PREDICT_WAIT_S = float(os.environ.get("YUCHE_PREDICT_WAIT_S", "60"))   # 앞 예측을 기다리는 최대 시간
 
 
@@ -517,7 +520,7 @@ def predict(
     # no_analysis / no_map (데이터 모드만 의미 있음): 첫 화면은 '사용자 시점' 요청과 '배수구 기준 시점(18초)'
     # 요청을 같이 보내는데, 화면은 앞 요청의 지도(map)와 뒤 요청의 분석 지도(analysis)만 쓴다.
     # 쓰지 않는 그림을 빼달라는 표시. 기본값 False 라 보내지 않으면 지금처럼 둘 다 그린다.
-    if not _PREDICT_LOCK.acquire(timeout=PREDICT_WAIT_S):
+    if not _PREDICT_GATE.acquire(high=not light, timeout=PREDICT_WAIT_S):
         raise HTTPException(503, "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.",
                             headers={"Retry-After": "10"})
     try:
@@ -527,7 +530,7 @@ def predict(
         return _predict(mode, rain_mm, time_s, dx, color_scheme, reverse,
                         light or no_analysis, light or no_map, light, file, mark)
     finally:
-        _PREDICT_LOCK.release()
+        _PREDICT_GATE.release()
 
 
 def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
