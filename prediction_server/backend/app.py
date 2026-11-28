@@ -533,6 +533,45 @@ def predict(
         _PREDICT_GATE.release()
 
 
+@app.post("/api/predict/series")
+def predict_series(
+    mode: str = Form(...),
+    rain_mm: float = Form(50.0),
+    times: str = Form(...),
+    dx: float = Form(DEFAULT_DX_M),
+    color_scheme: str = Form(cc.AUTO),
+    reverse: bool = Form(False),
+    file: UploadFile = File(...),
+    _user: str | None = Depends(_auth_gate),
+) -> dict:
+    """시간 변화 장면 여러 개를 한 번에 (light 와 같은 내용). times = "38,59,79,100,120".
+
+    화면은 첫 화면 뒤에 같은 파일을 시점마다 한 번씩(5번) 올렸다. 폰은 업로드와 ngrok 왕복이 5번 쌓여
+    노트북보다 몇 초씩 늦었다 -> 파일은 한 번 올리고 장면은 한 번에 받는다. 서버 계산량은 같다
+    (같은 파일이라 읽기·등고선 그리기는 캐시, 장면당 약 0.1초). 실패한 시점은 error 로 알려 주고 나머지는 계속.
+    """
+    try:
+        ts = [float(t) for t in times.split(",") if t.strip()][:12]
+    except ValueError as exc:
+        raise HTTPException(400, "times 는 '38,59,79' 처럼 쉼표로 구분한 숫자여야 합니다.") from exc
+    if not ts:
+        raise HTTPException(400, "times 가 비었습니다.")
+    if not _PREDICT_GATE.acquire(high=False, timeout=PREDICT_WAIT_S):
+        raise HTTPException(503, "다른 예측이 진행 중입니다. 잠시 후 다시 시도하세요.",
+                            headers={"Retry-After": "10"})
+    try:
+        frames: dict[str, dict] = {}
+        for t in ts:
+            file.file.seek(0)   # 같은 업로드를 시점마다 다시 읽는다
+            try:
+                frames[f"{t:g}"] = _predict(mode, rain_mm, t, dx, color_scheme, reverse, True, True, True, file, None)
+            except HTTPException as exc:
+                frames[f"{t:g}"] = {"error": exc.detail, "status": exc.status_code}
+        return {"frames": frames}
+    finally:
+        _PREDICT_GATE.release()
+
+
 def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: str,
              reverse: bool, skip_analysis: bool, skip_map: bool, light: bool,
              file: UploadFile, mark: tuple[float, float] | None = None) -> dict:

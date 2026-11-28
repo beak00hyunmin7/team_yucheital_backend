@@ -3,7 +3,7 @@
 
 한 사람 = 화면이 실제로 보내는 요청과 같게
   1) 첫 화면 요청 1번 (18초, 분석 지도는 안 그림: 화면은 '결과 이미지'를 열 때만 그린다)
-  2) 시간 변화 요청 5번 (38 · 59 · 79 · 100 · 120초, light)
+  2) 시간 변화 장면을 묶어서 (/api/predict/series): 38·59·79초 한 번(빗금·배수구용), 100·120초 한 번
 을 순서대로 보낸다. N명을 동시에 출발시키고 '첫 화면까지'와 '전체 끝까지' 걸린 시간을 표로 보여 준다.
 
 사용법 (서버를 먼저 켠 뒤, prediction_server 폴더에서):
@@ -12,6 +12,7 @@
     --users 1,5     잴 인원
     --mode hand --file 사진.jpg     손그림 사진으로
     --analysis      첫 화면에서 분석 지도까지 그리기 (예전 방식과 비교용)
+    --per-frame     시간 변화 장면을 하나씩 요청 (예전 방식과 비교용)
 """
 import argparse
 import getpass
@@ -31,10 +32,12 @@ for _s in (sys.stdout, sys.stderr):
 LIGHT_TIMES = [38, 59, 79, 100, 120]
 
 
-def predict(server, token, content, fname, mode, time_s, rain, light=False, no_analysis=False):
+def predict(server, token, content, fname, mode, time_s, rain, light=False, no_analysis=False, series=None):
     import uuid
     boundary = "----yuche" + uuid.uuid4().hex
     fields = {"mode": mode, "rain_mm": str(rain), "time_s": str(time_s)}
+    if series:
+        fields = {"mode": mode, "rain_mm": str(rain), "times": ",".join(str(t) for t in series)}
     if light:
         fields["light"] = "true"
     if no_analysis:
@@ -46,7 +49,8 @@ def predict(server, token, content, fname, mode, time_s, rain, light=False, no_a
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
     if token:
         headers["Authorization"] = "Bearer " + token
-    status, _raw = _request(server + "/api/predict", b"".join(parts), headers, timeout=180)
+    url = server + ("/api/predict/series" if series else "/api/predict")
+    status, _raw = _request(url, b"".join(parts), headers, timeout=180)
     return status
 
 
@@ -57,6 +61,14 @@ def one_user(i, start, out, args, token, content, fname):
     first = time.perf_counter() - t0
     fails = 0 if st == 200 else 1
     risk = None
+    if not args.per_frame:   # 화면과 같게: 빗금 구간(38·59·79초)을 한 묶음, 나머지(100·120초)를 한 묶음
+        if predict(args.server, token, content, fname, args.mode, 0, args.rain, series=LIGHT_TIMES[:3]) != 200:
+            fails += 1
+        risk = time.perf_counter() - t0
+        if predict(args.server, token, content, fname, args.mode, 0, args.rain, series=LIGHT_TIMES[3:]) != 200:
+            fails += 1
+        out[i] = (first, time.perf_counter() - t0, fails, st, risk)
+        return
     for t in LIGHT_TIMES:
         if predict(args.server, token, content, fname, args.mode, t, args.rain, light=True) != 200:
             fails += 1
@@ -87,6 +99,7 @@ def main():
     p.add_argument("--users", default="1,3,5,10")
     p.add_argument("--rain", type=float, default=50.0)
     p.add_argument("--analysis", action="store_true", help="첫 화면에서 분석 지도까지 그리기 (예전 방식)")
+    p.add_argument("--per-frame", action="store_true", help="시간 변화 장면을 하나씩 따로 요청 (예전 방식)")
     p.add_argument("--email", default=None)
     p.add_argument("--password", default=None)
     args = p.parse_args()
