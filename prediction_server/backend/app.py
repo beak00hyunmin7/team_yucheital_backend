@@ -99,7 +99,7 @@ from src.inference_api import (  # noqa: E402  (경로 설정 후 import)
 )
 from src.utils.render_fields import render_contour_rgb  # noqa: E402
 from src.inference_api import _LUT, _LUT_N  # noqa: E402  (수심 역변환 색표)
-from src.utils.render_fields import norm_to_depth  # noqa: E402
+from src.utils.render_fields import depth_to_norm, norm_to_depth  # noqa: E402
 from scipy.spatial import cKDTree  # noqa: E402
 
 # 검증 탭 전용(ground_truth -> scripts/prepare_openfoam_dataset)은 처음 쓸 때 불러온다.
@@ -124,6 +124,8 @@ import contour_color as cc  # noqa: E402  (이미지 색 체계 -> 학습 형식
 from terrain_io import InvalidTerrainData, load_terrain  # noqa: E402
 import handdrawn  # noqa: E402  (손그림 사진 -> 고도 격자)
 import expo  # noqa: E402  (전시 모드 YUCHE_EXPO=1: 로그인 없이 체험 + 손그림·결과 짝 모으기)
+import pond_hold  # noqa: E402  (막힌 웅덩이 물 보정)
+import guest_samples  # noqa: E402  (로그인 없이 해 보는 샘플)
 from analysis_figure import (  # noqa: E402
     intensity_from_prediction,
     render_analysis_figure,
@@ -339,6 +341,7 @@ def sample_image(name: str) -> FileResponse:
     path = (SAMPLES_DIR / name).resolve()
     if not str(path).startswith(str(SAMPLES_DIR.resolve())) or not path.is_file():
         raise HTTPException(404, "샘플을 찾을 수 없습니다.")
+    guest_samples.remember_file(path)   # 화면이 이 그림을 그대로 다시 올리면 로그인 없이 예측 (전시 관람객)
     return FileResponse(path, media_type="image/png")
 
 
@@ -489,6 +492,25 @@ def _auth_gate(authorization: str = Header(default="")) -> str | None:
     return None         # 개발 환경(기본): 지금처럼 DB 가 없으면 로그인 없이 통과
 
 
+NEED_LOGIN = "__need_login__"
+
+def _auth_gate_soft(authorization: str = Header(default="")) -> str | None:
+    """[11/28] _auth_gate 와 같되, 로그인이 필요한 상황이면 401 대신 NEED_LOGIN 을 돌려준다.
+    예측 엔드포인트가 올라온 파일을 보고 샘플이면(guest_samples) 로그인 없이 통과시키려고 쓴다.
+    전시 모드(expo)면 _auth_gate 가 토큰 없이 통과시킨다."""
+    try:
+        return _auth_gate(authorization)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return NEED_LOGIN
+        raise
+
+
+def _require_login_unless_sample(user: str | None, raw: bytes) -> None:
+    if user == NEED_LOGIN and not guest_samples.is_guest_sample(raw):
+        raise HTTPException(401, "로그인이 필요합니다.")
+
+
 # [속도 개선 2026-11] async def -> def + 예측은 한 번에 하나씩.
 # - 안에서 하는 일(색 변환·AI 추론·그림 그리기)이 전부 동기 계산이라, async 로 두면 예측 하나를
 #   계산하는 동안 서버 전체(로그인·기록 저장 등)가 멈췄다. def 로 두면 FastAPI 가 스레드에서
@@ -516,8 +538,13 @@ def predict(
     mark_x: float | None = Form(None),
     mark_y: float | None = Form(None),
     file: UploadFile = File(...),
-    _user: str | None = Depends(_auth_gate),
+    _user: str | None = Depends(_auth_gate_soft),
 ) -> dict:
+    # 샘플(전시 관람객용)은 로그인 없이. 그 밖의 파일은 로그인 필요 (guest_samples 설명)
+    raw = file.file.read(MAX_UPLOAD_BYTES + 1)
+    file.file.close()
+    _require_login_unless_sample(_user, raw)
+    file = _reupload(raw, file.filename)
     # mark_x / mark_y (선택, 그림 좌표 0~1 · 왼쪽 위 기준): 분석 지도의 ★를 이 자리에 그린다 (고도격자·손그림 모드).
     # 웹 화면은 120초까지 물이 남는 곳(침수 위험지역)으로 배수구를 다시 고르므로, 그 자리를 넘겨서 ★를 맞춘다.
     # 보내지 않으면 지금처럼 예측 유출이 가장 큰 칸에 그린다. drain_candidate 응답은 어느 쪽이든 그대로다.
@@ -546,7 +573,7 @@ def predict_series(
     color_scheme: str = Form(cc.AUTO),
     reverse: bool = Form(False),
     file: UploadFile = File(...),
-    _user: str | None = Depends(_auth_gate),
+    _user: str | None = Depends(_auth_gate_soft),
 ) -> dict:
     """시간 변화 장면 여러 개를 한 번에 (light 와 같은 내용). times = "38,59,79,100,120".
 
@@ -565,6 +592,7 @@ def predict_series(
     # 시점별 요청으로 되돌아갔다. 시점마다 메모리 사본(_reupload)을 새로 만들어 넘긴다.
     raw = file.file.read(MAX_UPLOAD_BYTES + 1)
     file.file.close()
+    _require_login_unless_sample(_user, raw)   # 샘플은 로그인 없이
     frames: dict[str, dict] = {}
     for t in ts:
         # 문은 장면마다 잡고 놓는다: 그 사이 다른 사람의 첫 화면 요청이 끼어들 수 있게 (첫 화면 우선)
@@ -707,6 +735,13 @@ def _predict(mode: str, rain_mm: float, time_s: float, dx: float, color_scheme: 
         with _HEAVY_LOCK:
             pred_img = predict_from_image(contour_img, **cond_kwargs)
         tm.mark("AI추론")
+        if cond_dim == 2 and pond_hold.ENABLED and time_s > POND_REF_TIME_S:
+            try:
+                pred_img, meta["pond_hold"] = _apply_pond_hold(
+                    pred_img, contour_img, terrain if grid_mode else None, rain_mm, time_s)
+            except Exception as exc:  # noqa: BLE001  (보정은 부가 기능: 실패해도 원래 예측을 준다)
+                print(f"[pond_hold] 웅덩이 보정을 건너뜁니다: {exc!r}")
+            tm.mark("웅덩이보정")
         overlay_img = _make_overlay(contour_img, pred_img)
         tm.mark("오버레이")
 
@@ -827,6 +862,73 @@ _TERRAIN_CACHE_MAX = 16
 
 
 _LUT_TREE = cKDTree(_LUT.astype(np.float64))
+
+# --- 웅덩이 보정 (backend/pond_hold.py 설명 참고) ---------------------------------------
+POND_REF_TIME_S = DEFAULT_TIME_S    # 이 시점부터 웅덩이 물을 붙잡는다 (그 전엔 아직 모이는 중)
+POND_MASK_MIN_M = 0.01              # 웅덩이 칸 중 이만큼 이상 물이 남은 칸을 '물이 갇힌 곳'으로 화면에 알려 준다
+_POND_REF_CACHE: dict = {}          # (등고선 그림 md5, 강우, 시점) -> 그 시점 예측 수심. 시간 변화 6장이 서로의 기준이 된다
+_POND_PIT_CACHE: dict = {}          # (등고선 그림 md5, 크기, 데이터 모드) -> 웅덩이 깊이
+_POND_CACHE_MAX = 48
+
+
+def _cache_put(cache: dict, key, value) -> None:
+    if len(cache) >= _POND_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _apply_pond_hold(pred_img: Image.Image, contour_img: Image.Image,
+                     terrain: np.ndarray | None, rain_mm: float, time_s: float) -> tuple[Image.Image, dict]:
+    """18초 뒤 시점 예측에서 막힌 웅덩이의 물이 앞 시점들의 최대보다 줄지 않게 한다. 예측 그림 방향 그대로 다룬다."""
+    w, h = pred_img.size
+    ckey = hashlib.md5(contour_img.tobytes()).hexdigest()
+    metric = terrain is not None
+
+    pkey = (ckey, (w, h), metric)
+    pits = _POND_PIT_CACHE.get(pkey)
+    if pits is None:
+        if metric:   # 예측 그림은 terrain 배열과 상하가 반대다
+            z = np.nan_to_num(np.ascontiguousarray(np.flipud(np.asarray(terrain, dtype=np.float32))))
+        else:
+            with _HEAVY_LOCK:
+                z, _frac = cc._to_height(contour_img, "terrain")
+        z = np.asarray(Image.fromarray(np.asarray(z, dtype=np.float32)).resize((w, h), Image.BILINEAR),
+                       dtype=np.float64)
+        pits = pond_hold.pit_depth(z)
+        _cache_put(_POND_PIT_CACHE, pkey, pits)
+
+    # 기준 = 지금 시점보다 앞선 재생 시점들(18초부터)의 예측. 웅덩이마다 그중 가장 많았던 물 부피를 붙잡는다.
+    # 웅덩이 물은 절반쯤이 18초 뒤에 가장 많아지므로(경사면 물이 늦게 모임) 18초 하나만 보면
+    # 38초에 더 고인 물이 59초에 다시 줄어든다. (계산 방식은 pond_hold.py 설명)
+    ref_times = [t for t in TIMELAPSE_TIMES_S if POND_REF_TIME_S <= t < time_s] or [POND_REF_TIME_S]
+    refs = []
+    for t in ref_times:
+        rkey = (ckey, round(float(rain_mm), 3), float(t))
+        d = _POND_REF_CACHE.get(rkey)
+        if d is None:
+            with _HEAVY_LOCK:
+                d = _depth_from_image(predict_from_image(contour_img, rain_mm=rain_mm, time_s=t))
+            _cache_put(_POND_REF_CACHE, rkey, d)
+        refs.append(d)
+
+    cur = _depth_from_image(pred_img)
+    new, info, keep = pond_hold.hold(cur, refs, pits, metric, times=[*ref_times, time_s])
+    info["ref_times_s"] = ref_times
+    # 물이 갇힌 웅덩이 칸 (보정 뒤 1cm 이상 남은 웅덩이 칸) -> 화면이 이 칸으로 침수 위험지역을 정한다.
+    # 3D 격자와 같은 96x96 · 그림 방향, 칸 i 는 바이트 i>>3 의 (i&7) 번째 비트 (화면 unpackMask 와 같은 순서)
+    # 작아서 건너뛰었거나 다 빠진 웅덩이는 빼고, 지금 물을 붙잡고 있는 웅덩이 칸만 (keep)
+    held = Image.fromarray((keep & (new >= POND_MASK_MIN_M)).astype(np.uint8) * 255)
+    held = np.asarray(held.resize((GRID3D_N, GRID3D_N), Image.NEAREST)) > 127
+    info["mask_n"] = GRID3D_N
+    info["mask_b64"] = base64.b64encode(np.packbits(held.reshape(-1), bitorder="little").tobytes()).decode("ascii")
+    if info["applied"]:
+        # 올린 칸만 학습 색표(Blues)로 다시 칠한다. 나머지 픽셀은 모델 출력 그대로 둔다
+        rgb = np.asarray(pred_img.convert("RGB")).copy()
+        up = new > cur + 1e-4
+        idx = np.clip(np.rint(depth_to_norm(new[up]) * (_LUT_N - 1)), 0, _LUT_N - 1).astype(int)
+        rgb[up] = np.rint(_LUT[idx]).astype(np.uint8)
+        pred_img = Image.fromarray(rgb)
+    return pred_img, info
 
 
 def _depth_from_image(img: Image.Image) -> np.ndarray:
