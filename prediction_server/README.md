@@ -109,10 +109,11 @@ prediction_server/
 | `YUCHE_SAMPLES_DIR` | `<AI_MODEL_DIR>/data/contours` | 샘플 지형 그림(학습 데이터라 저장소에 없음. 없으면 `/api/samples` 는 빈 목록) |
 | `YUCHE_SITE_DIR` | (없음) | 팀 화면 폴더(`…/yuche_frontend`). 지정하면 `/`·`/vtkjs.html`·`/style.css` 로 화면까지 내줘서 주소 하나(`:8000`)로 화면 + API. 이때 개발·검증용 화면은 `/test` |
 | `YUCHE_DB_URL` · `YUCHE_SECRET` · `YUCHE_HISTORY_DIR` · `YUCHE_WSL_DISTRO` | 아래 각 절 | |
+| `YUCHE_EXPO` · `YUCHE_EXPO_KEY` | 꺼짐 · (없음) | 전시 모드 (아래 '전시 모드' 절) |
 
 ## 테스트
 
-단위 테스트 — torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구):
+단위 테스트 — torch·DB 없이 돌아간다 (색 체계 변환·거부, DB 연결 복구, 손그림 사진 읽기):
 
 ```powershell
 cd prediction_server
@@ -234,6 +235,15 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
 `/api/health` 의 `db_error` 로 끊긴 이유를 바로 확인할 수 있다 (예전에는 예외를 통째로
 버려서 "down" 말고는 알 수 있는 게 없었다).
 
+4. **45초 루프만으로는 DB 가 2/3 시간 꺼져 있었다 (2026-11-28 원인 확정·수정)**. 새 WSL(2.7)은
+   **Windows 에서 띄운 명령이 하나도 없으면 약 15초 뒤 배포판을 멈추고**, systemd 가 MariaDB 도
+   같이 멈춘다. `wsl ... true` 는 바로 끝나므로 45초마다 약 15초만 살아 있다가 다시 멈췄다
+   (`journalctl -u mariadb` 에 45초마다 Started → 16초 뒤 Stopped 가 반복, 로그인·기록 저장이 간헐적으로 실패).
+   `run_windows.bat` 이 이제 서버가 도는 동안 **`wsl ... sleep infinity` 세션 하나를 계속 열어 둔다**
+   (`yuche-wsl-hold` 창, 서버 종료 시 함께 정리). 45초 루프는 포워딩 대비로 그대로 둔다.
+   수정 뒤 4분 동안 5초마다 확인 48/48 연결, MariaDB 재시작 0번.
+   서버 창을 ✕ 로 닫으면 정리 단계(`taskkill`)가 돌지 않아 `yuche-wsl-*` 창이 남을 수 있다 — 작업 관리자에서 닫으면 된다.
+
 ## 결과 그림
 
 - **등고선 데이터 모드**: 예측 배수맵을 지도 스타일로 표출
@@ -244,12 +254,62 @@ WSL/PC 를 재시작하면 `service mariadb start` 를 다시 해야 함 (run_wi
   (입력 등고선 / 예측 배수맵 / 오버레이)만 반환.
 - 한글 라벨은 `Malgun Gothic` 폰트 사용 (Windows 기본). 없으면 fallback.
 
-## 입력 방식 2가지 (사용자가 화면에서 선택)
+## 입력 방식 3가지 (사용자가 화면에서 선택)
 
 | 방식 | 보내는 것 | 서버 처리 | 언제 |
 |---|---|---|---|
 | **등고선 이미지** | PNG/JPG 등 | `terrain` 색 체계면 그대로, 아니면 색을 높이로 복원해 `terrain` 으로 다시 그려 모델 입력 (아래) | 등고선 이미지만 있을 때 |
 | **등고선 데이터** | 고도 격자 파일 | 학습과 동일한 `render_contour_rgb` 로 등고선 이미지를 만든 뒤 모델 입력 | 원본 DEM/격자를 가지고 있을 때 (스타일 불일치가 없어 더 정확) |
+| **손그림** (`mode=hand`) | 학습지 사진 (폰 카메라) | 사진을 고도 격자(1 km, 96칸)로 읽은 뒤 등고선 데이터와 똑같이 처리 (아래) | 전시 체험: 관람객이 직접 그린 산 |
+
+### 손그림 모드 (`handdrawn.py`, 전시용)
+
+학습지 규칙: 네모 칸 네 모서리에 검은 네모(왼쪽 위만 속이 빈 네모), 안에 **파랑 동그라미를 여러 겹**(안쪽일수록 높음),
+꼭대기는 **빨강**. 굵은 유성 매직 권장. 동그라미는 끝까지 닫고, 선끼리 닿지 않게.
+
+1. 모서리 네모 4개를 찾아 비스듬한 사진을 정사각형으로 편다 (빈 네모가 왼쪽 위 → 사진이 돌아가 있어도 방향을 맞춘다)
+2. 파랑·빨강 선만 남긴다 (튄 잉크 점은 버림)
+3. 종이 테두리와 이어진 빈 곳 = 0층, 선을 하나 넘을 때마다 +1층 → 층 사이를 매끈하게 이어 고도로 (한 층 10 m)
+4. 96×96 고도 격자로 만들어 등고선 데이터 모드와 같은 길(분석 지도·시간 변화·3D)로 예측
+
+- 응답에 `hand_preview_png_base64`(왼쪽 = 편 사진, 오른쪽 = 읽은 층)가 추가된다. 화면의 "이렇게 읽었어요" 그림.
+- 모서리 네모를 못 찾으면 사진 전체를 읽고 주의 문구를 띄운다. 선을 못 찾거나 닫힌 동그라미가 없으면 422 와 안내 문구.
+- 한 장 읽는 데 약 0.3 초(노트북 CPU). numpy·scipy·pillow 만 써서 추가 설치 없음.
+- 그림 밖 땅은 **위쪽이 높고 아래쪽이 낮게 15 m** 기울인다(`YUCHE_HAND_TILT_M`, 0 이면 평평).
+  완전히 평평하면 등고선 그림에서 그림 밖 전체가 가장 낮은 색이 되어 AI 가 산 주변 평지 전체를 물로 예측했다
+  (학습 지형에는 평평한 땅이 없다). 기울이면 물이 아래쪽과 산 사이 골짜기로 모인다.
+
+### 전시 모드 (`expo.py`, `YUCHE_EXPO=1`)
+
+전시회에서 관람객이 가입·로그인 없이 체험하고, 손그림 예측 1번마다 **손그림 + 결과 그림** 짝을 서버에 모은다.
+`YUCHE_EXPO` 를 켜지 않으면 기존 동작은 그대로다.
+
+켜는 법 (서버 켜기 전, 같은 명령 창에서):
+
+```bat
+set YUCHE_EXPO=1
+set YUCHE_EXPO_KEY=팀만아는문자열
+run_windows.bat
+```
+
+`YUCHE_EXPO_KEY` 의 실제 값은 이 문서·저장소에 쓰지 말 것 (모아보기 주소의 열쇠).
+
+- `/api/health` 에 `"expo": true` → 화면이 로그인·회원가입을 건너뛰고, 왼쪽 '기록' 탭을 숨기고, 기록 저장(`/api/history`)을 하지 않는다.
+- `/api/predict` · `/api/predict/series` 가 토큰 없이 통과한다.
+- **손그림 모드의 첫 화면 `/api/predict` 요청에서만** 저장하고 응답에 `expo_id` 를 넣는다
+  (이미지·고도 격자 모드, 시간 변화(`light`)·묶음(`series`)·기준 시점·분석 지도(`no_map`) 요청은 저장하지 않음).
+  저장 위치 `data/expo/YYYYMMDD/` (git 에 안 올라감):
+  - `{expo_id}_drawing.jpg` 네모 4개 안쪽을 원본 사진에서 다시 반듯하게 편 손그림 (1024×1024)
+  - `{expo_id}_read.png` '이렇게 읽었어요' 그림
+  - **원본 사진과 업로드 파일 이름은 저장하지 않는다.** 네모 4개를 못 찾은 사진은 잘라낼 수 없어 아무것도 저장하지 않는다.
+- 화면은 빗금·배수구 계산이 끝나면 18초 지도 + 빨간 빗금 + 배수구 동그라미를 한 장(JPEG, 긴 변 1024)으로 만들어
+  `POST /api/expo/result` (`expo_id`, `result_image`, `meta`=강우량·배수구·빗금 면적·기준값 JSON) 로 보낸다.
+  입력 사진은 다시 올리지 않는다. 서버는 있는 번호 · 발급 후 10분 이내 · 한 번만 · 3MB 이하만 받고 (아니면 400)
+  `{expo_id}_result.jpg` 저장 + 같은 날짜 폴더 `records.jsonl` 에 한 줄 (시각, 강우량, 배수구, 빗금 면적, 파일 이름).
+- 모아보기 (팀 전용): `http://<서버>:8000/expo/gallery?key=<YUCHE_EXPO_KEY>` → 날짜별 [손그림 | 읽은 그림 | 결과] 와 전체 zip.
+  키가 없거나 틀리면 403. 결과가 없는 짝은 '결과 없음'.
+- 전시 후 삭제: `.venv\Scripts\python.exe clear_expo_data.py` → 건수를 보여 주고 `y` 를 입력해야 `data/expo` 전체를 지운다.
+- 시험: `tests/test_expo.py` (켬/끔 각각 토큰 없는 예측 · 손그림만 번호 · 짝 저장 · 키 없는 갤러리 403 · 원본 미저장 · 10분 지난 번호 거부)
 
 ### 이미지 색 체계와 높낮이 반전 (`contour_color.py`)
 
@@ -331,17 +391,19 @@ $env:AI_MODEL_CHECKPOINT = "C:\...\ai_model\checkpoints_gan\best.pt"   # 후 재
 
 ## 응답 (`POST /api/predict`, multipart)
 
-폼 필드: `mode`(image|terrain), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
-`light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false
+폼 필드: `mode`(image|terrain|hand), `rain_mm`, `time_s`, `dx`(terrain 전용), `color_scheme`·`reverse`(image 전용, 위 "이미지 색 체계" 참고), `file`,
+`light`(시간 변화용: 분석 지도·지도 생략), `no_analysis`·`no_map`(첫 화면 두 요청이 안 쓰는 그림 생략) — 아래 "속도" 참고. 셋 다 기본 false,
+`mark_x`·`mark_y`(선택, 그림 좌표 0~1·왼쪽 위 기준: 분석 지도의 ★를 이 자리에. 웹 화면이 120초 침수 위험지역으로 고른 배수구를 넘긴다. 없으면 예측 유출 최대 칸)
 
 ```json
 {
   "contour_png_base64":   "…",   // 실제로 모델에 들어간 등고선 (색 체계를 변환했으면 변환본)
   "original_png_base64":  "…",   // 색 체계를 변환했을 때 올린 원본 (아니면 null)
+  "hand_preview_png_base64": "…", // hand 모드: 읽은 결과 (편 사진 | 읽은 층). 아니면 null
   "color_info":           { "scheme": "gray", "converted": true, "reversed": false, "legend": ["#000000", "…"], "warnings": [] },
   "prediction_png_base64":"…",   // 예측 배수맵
   "overlay_png_base64":   "…",   // 등고선 + 예측 겹침
-  "analysis_png_base64":  "…",   // terrain 모드: 제목·컬러바가 있는 분석 지도
+  "analysis_png_base64":  "…",   // terrain·hand 모드: 제목·컬러바가 있는 분석 지도
   "map_jpg_base64":       "…",   // terrain 모드: 제목·컬러바·별표 없는 정사각 지도(JPEG). 웹 화면이 꽉 채워 쓰고 배수구 후보는 HTML 로 얹는다
   "stats": { "max_depth_cm": 27.3, "wet_area_pct": 20.3, "wet_threshold_cm": 5.0 },   // 지도 위 요약 칩
   "grid3d": { "n": 96, "height_u16": "…", "depth_u16": "…", "depth_unit_m": 0.0001, "max_depth_m": 0.14, "relief_m": null, "extent_m": null },
